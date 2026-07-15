@@ -86,18 +86,39 @@ _menu_item() {
   printf "  ${CYN}${B}[%s]${R}  %b\n" "$1" "$2"
 }
 
-# ── Network info ──────────────────────────────────────────────
-_get_public_ip() { curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || true; }
+# ── Network info  (fetched ONCE at startup, cached in globals) ───────
+_get_public_ip()  { curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || true; }
 _get_ipinfo_field() {
   local field="$1" ip="$2"
   [[ -n "$ip" ]] || { echo ""; return; }
   local json; json="$(curl -fsSL --max-time 4 "https://ipinfo.io/${ip}/json" 2>/dev/null || true)"
   [[ -n "$json" ]] || { echo ""; return; }
-  echo "$json" | tr -d '\n' | sed -n "s/.*\"${field}\":[ ]*\"\\([^\"]*\\)\".*/\\1/p" | head -n1
+  echo "$json" | tr -d '\n' | sed -n "s/.*\"${field}\":[ ]*\"\([^\"]*\)\".*/\1/p" | head -n1
 }
+
+# Globals populated once by _fetch_server_info
+_CACHE_IP=""
+_CACHE_LOC=""
+_CACHE_DC=""
+_CACHE_READY=0
+
+_fetch_server_info() {
+  # Run in background; sets globals when done
+  _CACHE_IP="$(_get_public_ip)"
+  if [[ -n "$_CACHE_IP" ]]; then
+    local city country org
+    city="$(_get_ipinfo_field city    "$_CACHE_IP")"
+    country="$(_get_ipinfo_field country "$_CACHE_IP")"
+    org="$(_get_ipinfo_field org     "$_CACHE_IP")"
+    _CACHE_LOC="${city}${city:+, }${country}"
+    _CACHE_DC="${org}"
+  fi
+  _CACHE_LOC="${_CACHE_LOC:-Unknown}"
+  _CACHE_DC="${_CACHE_DC:-Unknown}"
+  _CACHE_READY=1
+}
+
 _get_location() {
-  local ip; ip="$(_get_public_ip)"
-  local city country
   city="$(_get_ipinfo_field city "$ip")"
   country="$(_get_ipinfo_field country "$ip")"
   [[ -n "$city$country" ]] && echo "${city}${city:+, }${country}" || echo "Unknown"
@@ -470,10 +491,10 @@ _enable_cron() {
   _msg_ok "Cron enabled: every ${interval} minute(s)."
 }
 
-# ── Banner ────────────────────────────────────────────────────
+# ── Banner  (reads from cache — zero network delay) ──────────
 _print_banner() {
-  local loc; loc="$(_get_location)"
-  local dc;  dc="$(_get_datacenter)"
+  local loc="${_CACHE_LOC:-…}"
+  local dc="${_CACHE_DC:-…}"
   local inst_c="$RED" inst_t="NOT INSTALLED"
   if is_installed; then inst_c="$GRN"; inst_t="INSTALLED"; fi
 
@@ -813,4 +834,6 @@ _main_menu() {
 # ════════════════════════════════════════════════════════════
 need_root
 ensure
+# Fetch server info ONCE here — banner reads from cache after this (instant)
+_fetch_server_info
 _main_menu
