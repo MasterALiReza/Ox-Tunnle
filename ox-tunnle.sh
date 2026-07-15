@@ -241,7 +241,6 @@ _get_slot_details() {
   fi
 }
 
-# FIX BUG-LOGS: use tail -f on log file, NOT screen -r
 # Ctrl+C only kills tail; the tunnel screen session keeps running
 _logs_slot() {
   local prof="$1" log_file="${LOG_DIR}/${prof}.log"
@@ -253,12 +252,13 @@ _logs_slot() {
   fi
   _msg_info "Live log: ${B}$prof${R}  ${DIM}(Ctrl+C exits this view — tunnel stays running)${R}"
   _hr; echo ""
-  # CRITICAL FIX: Ctrl+C only kills `tail`, NOT the screen/Python process
-  trap '' INT
+  # CRITICAL FIX: trap ':' catches INT in bash (so script doesn't exit) 
+  # but allows child 'tail' to receive default SIGINT and terminate.
+  trap ':' INT
   tail -n 80 -f "$log_file" 2>/dev/null || true
   trap - INT
   echo ""; _msg_info "Log view ended. Tunnel is still running."
-  pause
+  # Remove pause so it returns immediately to the slot management menu
 }
 
 # FIX BUG-DELETE: require explicit 'yes' confirmation + wait for stop
