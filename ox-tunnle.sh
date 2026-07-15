@@ -267,11 +267,14 @@ _delete_slot() {
   [[ -f "$f" ]] || { _msg_warn "Profile '$prof' does not exist."; return 1; }
   echo ""
   _msg_warn "${RED}Delete '${B}${prof}${R}${RED}'? This cannot be undone.${R}"
-  local confirm
-  read -r -p "  Type ${B}yes${R} to confirm: " confirm < /dev/tty
-  # Trim whitespace/newlines (some terminals may include them) + case-insensitive match
-  confirm="${confirm//[$'\t\r\n ']/}"
-  [[ "${confirm,,}" == "yes" ]] || { _msg_info "Cancelled."; return 0; }
+  echo ""
+  read -r -p "  Type 'yes' to confirm: " confirm < /dev/tty || confirm=""
+  # Trim all whitespace and convert to lowercase for comparison
+  confirm="$(echo "$confirm" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  if [[ "$confirm" != "yes" ]]; then
+    _msg_info "Cancelled."
+    return 0
+  fi
   if _is_running "$prof"; then
     _msg_info "Stopping tunnel first..."
     _stop_slot "$prof"
