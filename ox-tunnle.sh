@@ -83,7 +83,7 @@ _section() {
 }
 
 _menu_item() {
-  printf "  ${CYN}${B}[%s]${R}  %s\n" "$1" "$2"
+  printf "  ${CYN}${B}[%s]${R}  %b\n" "$1" "$2"
 }
 
 # ── Network info ──────────────────────────────────────────────
@@ -124,7 +124,7 @@ _read_ip() {
   while true; do
     read -r -p "  ${prompt}: " ip < /dev/tty
     ip="${ip//[^0-9.]/}"
-    _validate_ip "$ip" && { echo "$ip"; return; }
+    if _validate_ip "$ip"; then echo "$ip"; return; fi
     _msg_warn "Invalid IP address. Try again."
   done
 }
@@ -133,7 +133,7 @@ _read_port() {
   while true; do
     read -r -p "  ${prompt}${default:+ [${default}]}: " p < /dev/tty
     p="${p:-$default}"; p="${p//[^0-9]/}"
-    _validate_port "$p" && { echo "$p"; return; }
+    if _validate_port "$p"; then echo "$p"; return; fi
     _msg_warn "Invalid port (1–65535). Try again."
   done
 }
@@ -263,7 +263,7 @@ _status_slot() {
   local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" PORTS=""
   source "$f" 2>/dev/null || true
   local st_c="$RED" st_i="○" st_t="Stopped"
-  _is_running "$prof" && { st_c="$GRN"; st_i="●"; st_t="Running"; }
+  if _is_running "$prof"; then st_c="$GRN"; st_i="●"; st_t="Running"; fi
   echo ""
   echo -e "  ${CYN}Profile${R} : ${B}${prof}${R}  ${CYN}Role${R}: ${B}${ROLE^^}${R}"
   if [[ "$ROLE" == "eu" ]]; then
@@ -475,7 +475,7 @@ _print_banner() {
   local loc; loc="$(_get_location)"
   local dc;  dc="$(_get_datacenter)"
   local inst_c="$RED" inst_t="NOT INSTALLED"
-  is_installed && { inst_c="$GRN"; inst_t="INSTALLED"; }
+  if is_installed; then inst_c="$GRN"; inst_t="INSTALLED"; fi
 
   clear || true
   _dhr
@@ -515,7 +515,7 @@ _print_all_slots() {
       local st_c="$DIM" st_t="(empty)"
       if [[ -f "$CONF/${prof}.env" ]]; then
         st_c="$YLW"; st_t="saved"
-        _is_running "$prof" && { st_c="$GRN"; st_t="running"; }
+        if _is_running "$prof"; then st_c="$GRN"; st_t="running"; fi
       fi
       printf "  ${CYN}${B}%3s${R}  %-10s%-7s${st_c}%s${R}\n" \
         "$n" "$prof" "${role^^}" "$st_t"
@@ -544,7 +544,7 @@ _print_saved_profiles() {
     ((n++))
     local role="${prof%%[0-9]*}"
     local st_c="$RED" st_t="Stopped"
-    _is_running "$prof" && { st_c="$GRN"; st_t="Running"; }
+    if _is_running "$prof"; then st_c="$GRN"; st_t="Running"; fi
     local details; details="$(_get_slot_details "$prof")"
     printf "  ${CYN}${B}%3s${R}  %-10s%-7s${st_c}%-10s${R}${DIM}%s${R}\n" \
       "$n" "$prof" "${role^^}" "$st_t" "$details"
@@ -559,7 +559,7 @@ _slot_num_to_prof() {
   for role in eu iran; do
     for i in $(seq 1 "$MAX"); do
       ((nn++))
-      [[ "$nn" -eq "$n" ]] && { echo "${role}${i}"; return; }
+      if [[ "$nn" -eq "$n" ]]; then echo "${role}${i}"; return; fi
     done
   done
   echo ""
@@ -573,7 +573,7 @@ _saved_idx_to_prof() {
       local prof="${role}${i}"
       [[ -f "$CONF/${prof}.env" ]] || continue
       ((nn++))
-      [[ "$nn" -eq "$n" ]] && { echo "$prof"; return; }
+      if [[ "$nn" -eq "$n" ]]; then echo "$prof"; return; fi
     done
   done
   echo ""
@@ -680,7 +680,7 @@ _all_status_menu() {
       _hr
     done
   done
-  [[ $found -eq 0 ]] && { echo ""; _msg_info "No saved profiles found."; echo ""; }
+  if [[ $found -eq 0 ]]; then echo ""; _msg_info "No saved profiles found."; echo ""; fi
   pause
 }
 
@@ -741,7 +741,7 @@ _script_menu() {
         echo ""
         _msg_warn "Uninstall will remove ox-tunnle from system. Tunnels keep running."
         local c; read -r -p "  Confirm (yes/N): " c < /dev/tty
-        [[ "$c" == "yes" ]] && { _uninstall_script; pause; return; } || _msg_info "Cancelled."
+        if [[ "$c" == "yes" ]]; then _uninstall_script; pause; return; else _msg_info "Cancelled."; fi
         pause ;;
       0) return ;;
       *) _msg_warn "Invalid option."; sleep 0.8 ;;
