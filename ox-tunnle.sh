@@ -154,7 +154,7 @@ _stop_slot() {
   screen -S "$s" -X quit >/dev/null 2>&1 || true
   local i=0
   while [[ $i -lt 6 ]] && _is_running "$prof"; do
-    sleep 0.5; ((i++))
+    sleep 0.5; i=$((i + 1))
   done
   # Force-kill if still alive after 3s
   if _is_running "$prof"; then
@@ -511,7 +511,7 @@ _print_all_slots() {
   for role in eu iran; do
     for i in $(seq 1 "$MAX"); do
       local prof="${role}${i}"
-      ((n++))
+      n=$((n + 1))
       local st_c="$DIM" st_t="(empty)"
       if [[ -f "$CONF/${prof}.env" ]]; then
         st_c="$YLW"; st_t="saved"
@@ -541,7 +541,7 @@ _print_saved_profiles() {
   _hr
   local n=0
   for prof in "${profs[@]}"; do
-    ((n++))
+    n=$((n + 1))
     local role="${prof%%[0-9]*}"
     local st_c="$RED" st_t="Stopped"
     if _is_running "$prof"; then st_c="$GRN"; st_t="Running"; fi
@@ -558,7 +558,7 @@ _slot_num_to_prof() {
   local n="$1" nn=0
   for role in eu iran; do
     for i in $(seq 1 "$MAX"); do
-      ((nn++))
+      nn=$((nn + 1))
       if [[ "$nn" -eq "$n" ]]; then echo "${role}${i}"; return; fi
     done
   done
@@ -572,7 +572,7 @@ _saved_idx_to_prof() {
     for i in $(seq 1 "$MAX"); do
       local prof="${role}${i}"
       [[ -f "$CONF/${prof}.env" ]] || continue
-      ((nn++))
+      nn=$((nn + 1))
       if [[ "$nn" -eq "$n" ]]; then echo "$prof"; return; fi
     done
   done
