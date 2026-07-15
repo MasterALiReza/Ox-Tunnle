@@ -502,24 +502,45 @@ _list_saved_profiles() {
   echo "${list[@]:-}"
 }
 
-# Print numbered list of ALL slots (eu1-10, iran1-10) for new/edit
+# Print numbered list of ALL slots grouped by role (EU 1-10, IRAN 11-20)
 _print_all_slots() {
-  echo ""
-  echo -e "  ${DIM}  #  Name      Role   Status${R}"
-  _hr
   local n=0
-  for role in eu iran; do
-    for i in $(seq 1 "$MAX"); do
-      local prof="${role}${i}"
-      n=$((n + 1))
-      local st_c="$DIM" st_t="(empty)"
-      if [[ -f "$CONF/${prof}.env" ]]; then
-        st_c="$YLW"; st_t="saved"
-        if _is_running "$prof"; then st_c="$GRN"; st_t="running"; fi
-      fi
-      printf "  ${CYN}${B}%3s${R}  %-10s%-7s${st_c}%s${R}\n" \
-        "$n" "$prof" "${role^^}" "$st_t"
-    done
+
+  # ── EU Servers (slots 1-10) ──
+  echo ""
+  echo -e "  ${CYN}${B}┌─────────────────────────────────────┐${R}"
+  echo -e "  ${CYN}${B}│   🌍  EU SERVERS  (slots 1 – 10)    │${R}"
+  echo -e "  ${CYN}${B}└─────────────────────────────────────┘${R}"
+  echo -e "  ${DIM}  #   Name        Status${R}"
+  _hr
+  for i in $(seq 1 "$MAX"); do
+    local prof="eu${i}"
+    n=$((n + 1))
+    local st_c="$DIM" st_t="(empty)"
+    if [[ -f "$CONF/${prof}.env" ]]; then
+      st_c="$YLW"; st_t="saved"
+      if _is_running "$prof"; then st_c="$GRN"; st_t="● running"; fi
+    fi
+    printf "  ${CYN}${B}%3s${R}   %-12s${st_c}%s${R}\n" "$n" "$prof" "$st_t"
+  done
+  _hr
+
+  # ── IRAN Servers (slots 11-20) ──
+  echo ""
+  echo -e "  ${CYN}${B}┌─────────────────────────────────────┐${R}"
+  echo -e "  ${CYN}${B}│   🇮🇷  IRAN SERVERS  (slots 11 – 20) │${R}"
+  echo -e "  ${CYN}${B}└─────────────────────────────────────┘${R}"
+  echo -e "  ${DIM}  #   Name        Status${R}"
+  _hr
+  for i in $(seq 1 "$MAX"); do
+    local prof="iran${i}"
+    n=$((n + 1))
+    local st_c="$DIM" st_t="(empty)"
+    if [[ -f "$CONF/${prof}.env" ]]; then
+      st_c="$YLW"; st_t="saved"
+      if _is_running "$prof"; then st_c="$GRN"; st_t="● running"; fi
+    fi
+    printf "  ${CYN}${B}%3s${R}   %-12s${st_c}%s${R}\n" "$n" "$prof" "$st_t"
   done
   _hr
 }
@@ -628,15 +649,15 @@ _new_profile_menu() {
     _dhr
     echo -e "  ${CYN}${B}  ➕  NEW / EDIT PROFILE${R}"
     _dhr
-    echo -e "  ${DIM}Select a slot to configure. Numbers 1-10 = EU, 11-20 = IRAN.${R}"
+    echo -e "  ${DIM}  Choose a slot number to create or edit a tunnel profile.${R}"
     _print_all_slots
     echo ""
     _menu_item "0" "◀  Back"
     _hr; echo ""
-    local choice; read -r -p "  Slot number (1-20) or 0: " choice < /dev/tty
-    [[ "$choice" =~ ^[0-9]+$ ]] || { _msg_warn "Enter a number."; sleep 0.8; continue; }
+    local choice; read -r -p "  Enter slot number (1-20) or 0 to go back: " choice < /dev/tty
+    [[ "$choice" =~ ^[0-9]+$ ]] || { _msg_warn "Please enter a number."; sleep 0.8; continue; }
     [[ "$choice" -eq 0 ]] && return
-    [[ "$choice" -ge 1 && "$choice" -le 20 ]] || { _msg_warn "Enter 1-20."; sleep 0.8; continue; }
+    [[ "$choice" -ge 1 && "$choice" -le 20 ]] || { _msg_warn "Enter a number between 1 and 20."; sleep 0.8; continue; }
     local prof; prof="$(_slot_num_to_prof "$choice")"
     [[ -n "$prof" ]] || { _msg_warn "Slot not found."; sleep 0.8; continue; }
     _edit_profile "$prof"
