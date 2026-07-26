@@ -294,7 +294,8 @@ _status_slot() {
   local st_c="$RED" st_i="○" st_t="Stopped"
   if _is_running "$prof"; then st_c="$GRN"; st_i="●"; st_t="Running"; fi
   echo ""
-  echo -e "  ${CYN}Profile${R} : ${B}${prof}${R}${LABEL:+  ${DIM}[${LABEL}]${R}}  ${CYN}Role${R}: ${B}${ROLE^^}${R}"
+  echo -e "  ${CYN}Profile${R} : ${B}${prof}${R}  ${CYN}Role${R}: ${B}${ROLE^^}${R}"
+  # Only show Label line if set (no inline duplicate)
   if [[ -n "$LABEL" ]]; then
     echo -e "  ${CYN}Label${R}   : ${B}${LABEL}${R}"
   fi
@@ -384,14 +385,19 @@ _rename_label() {
   if [[ "${new_label,,}" == "clear" ]]; then
     new_label=""
   else
-    new_label="$(echo "$new_label" | tr -d '"'\''\\' | cut -c1-30)"
+    # Sanitize: remove quotes and backslashes, cap at 30 chars
+    new_label="$(echo "$new_label" | tr -d '"'\''\\'  | cut -c1-30)"
   fi
 
+  # Use a temp file to avoid sed special-character injection
+  local tmp; tmp="$(mktemp)"
   if grep -q "^LABEL=" "$f"; then
-    sed -i "s/^LABEL=.*/LABEL=${new_label}/" "$f"
+    grep -v "^LABEL=" "$f" > "$tmp"
   else
-    echo "LABEL=${new_label}" >> "$f"
+    cp "$f" "$tmp"
   fi
+  echo "LABEL=${new_label}" >> "$tmp"
+  mv "$tmp" "$f"
   _msg_ok "Label updated for $prof"
 }
 
@@ -580,13 +586,16 @@ _print_all_slots() {
   for i in $(seq 1 "$MAX"); do
     local prof="eu${i}"
     n=$((n + 1))
-    local st_c="$DIM" st_t="(empty)" LABEL=""
+    # Read label in a subshell to avoid polluting globals across iterations
+    local lbl st_c="$DIM" st_t="(empty)"
     if [[ -f "$CONF/${prof}.env" ]]; then
-      source "$CONF/${prof}.env" 2>/dev/null || true
+      lbl="$(source "$CONF/${prof}.env" 2>/dev/null; echo "${LABEL:-}")"
       st_c="$YLW"; st_t="saved"
       if _is_running "$prof"; then st_c="$GRN"; st_t="● running"; fi
+    else
+      lbl=""
     fi
-    local lbl_disp="${LABEL:--}"
+    local lbl_disp="${lbl:--}"
     [[ ${#lbl_disp} -gt 20 ]] && lbl_disp="${lbl_disp:0:17}..."
     printf "  ${CYN}${B}%3s${R}   %-11s %-21s ${st_c}%s${R}\n" "$n" "$prof" "$lbl_disp" "$st_t"
   done
@@ -602,13 +611,15 @@ _print_all_slots() {
   for i in $(seq 1 "$MAX"); do
     local prof="iran${i}"
     n=$((n + 1))
-    local st_c="$DIM" st_t="(empty)" LABEL=""
+    local lbl st_c="$DIM" st_t="(empty)"
     if [[ -f "$CONF/${prof}.env" ]]; then
-      source "$CONF/${prof}.env" 2>/dev/null || true
+      lbl="$(source "$CONF/${prof}.env" 2>/dev/null; echo "${LABEL:-}")"
       st_c="$YLW"; st_t="saved"
       if _is_running "$prof"; then st_c="$GRN"; st_t="● running"; fi
+    else
+      lbl=""
     fi
-    local lbl_disp="${LABEL:--}"
+    local lbl_disp="${lbl:--}"
     [[ ${#lbl_disp} -gt 20 ]] && lbl_disp="${lbl_disp:0:17}..."
     printf "  ${CYN}${B}%3s${R}   %-11s %-21s ${st_c}%s${R}\n" "$n" "$prof" "$lbl_disp" "$st_t"
   done
@@ -712,8 +723,12 @@ _bulk_restart_all() {
 _manage_slot_menu() {
   local prof="$1"
   while true; do
-    local f="$CONF/${prof}.env" LABEL=""
-    [[ -f "$f" ]] && source "$f" 2>/dev/null || true
+    local f="$CONF/${prof}.env"
+    # Read label safely in subshell to avoid polluting outer scope
+    local LABEL=""
+    if [[ -f "$f" ]]; then
+      LABEL="$(source "$f" 2>/dev/null; echo "${LABEL:-}")"
+    fi
     clear || true
     _dhr
     echo -e "  ${CYN}${B}  ⚙  MANAGE TUNNEL${R}  ${DIM}— $prof${LABEL:+ [$LABEL]}${R}"
