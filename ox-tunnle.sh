@@ -335,7 +335,7 @@ _edit_profile() {
     fi
     cat > "$f" <<EOF
 ROLE=eu
-LABEL=${LABEL}
+LABEL="${LABEL}"
 IRAN_IP=${IRAN_IP}
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
@@ -351,7 +351,7 @@ EOF
     if [[ "${as_choice,,}" == "y" ]]; then
       cat > "$f" <<EOF
 ROLE=iran
-LABEL=${LABEL}
+LABEL="${LABEL}"
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 AUTO_SYNC=true
@@ -362,7 +362,7 @@ EOF
       PORTS="${ports_raw//[^0-9,]/}"
       cat > "$f" <<EOF
 ROLE=iran
-LABEL=${LABEL}
+LABEL="${LABEL}"
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 AUTO_SYNC=false
@@ -396,7 +396,7 @@ _rename_label() {
   else
     cp "$f" "$tmp"
   fi
-  echo "LABEL=${new_label}" >> "$tmp"
+  echo "LABEL=\"${new_label}\"" >> "$tmp"
   mv "$tmp" "$f"
   _msg_ok "Label updated for $prof"
 }
