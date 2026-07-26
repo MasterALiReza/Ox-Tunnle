@@ -54,8 +54,41 @@ fetch_url_to() {
 
 is_installed() { [[ -x "$INSTALL_PATH" ]]; }
 
+_sanitize_env_file() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  local tmp; tmp="$(mktemp)"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then
+      echo "$line" >> "$tmp"
+      continue
+    fi
+    if [[ "$line" =~ ^([A-Za-z0-9_]+)=(.*)$ ]]; then
+      local key="${BASH_REMATCH[1]}"
+      local val="${BASH_REMATCH[2]}"
+      val="${val#\"}"
+      val="${val%\"}"
+      val="${val#\'}"
+      val="${val%\'}"
+      val="$(echo "$val" | tr -d '"\\')"
+      echo "${key}=\"${val}\"" >> "$tmp"
+    else
+      echo "$line" >> "$tmp"
+    fi
+  done < "$f"
+  mv "$tmp" "$f"
+}
+
+_sanitize_all_envs() {
+  mkdir -p "$CONF"
+  for f in "$CONF"/*.env; do
+    [[ -f "$f" ]] && _sanitize_env_file "$f"
+  done
+}
+
 ensure() {
   mkdir -p "$CONF" "$LOG_DIR" "$(dirname "$PY")"
+  _sanitize_all_envs
   have screen  || apt_try_install screen
   have python3 || apt_try_install python3
   have curl    || apt_try_install curl
@@ -188,8 +221,9 @@ _stop_slot() {
 _run_slot() {
   local prof="$1" f="$CONF/${prof}.env"
   [[ -f "$f" ]] || { _msg_warn "Profile not found: $prof"; return 1; }
+  _sanitize_env_file "$f"
   # shellcheck disable=SC1090
-  source "$f"
+  source "$f" 2>/dev/null || true
   local s; s="$(_session_name "$prof")"
   local log_file="${LOG_DIR}/${prof}.log"
   mkdir -p "$LOG_DIR"
@@ -489,7 +523,7 @@ start_from_profile(){
   local prof="$1" f="${CONF}/${prof}.env"
   [[ -f "$f" ]] || return 0
   # shellcheck disable=SC1090
-  source "$f"
+  source "$f" 2>/dev/null || true
   local s; s="$(session_name "$prof")"
   local log_file="${LOG_DIR}/${prof}.log"
   mkdir -p "$LOG_DIR"
