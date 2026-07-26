@@ -472,27 +472,35 @@ _optimize_server() {
     sysctl -w net.core.default_qdisc=fq          >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
     cat > /etc/sysctl.d/99-ox-tunnle.conf <<'EOF'
-# Ox Tunnle — high-bandwidth network tuning
+# Ox Tunnle — low-latency + high-throughput network tuning
+
+# ── Congestion control (BBR = good throughput without bufferbloat)
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 
-# TCP send/receive buffer — match Python SOCKBUF = 16 MB
-net.core.rmem_max=33554432
-net.core.wmem_max=33554432
-net.ipv4.tcp_rmem=4096 1048576 33554432
-net.ipv4.tcp_wmem=4096 1048576 33554432
+# ── Socket buffers — match Python SOCKBUF = 4 MB
+#    (large enough for throughput, small enough to avoid bufferbloat)
+net.core.rmem_max=8388608
+net.core.wmem_max=8388608
+net.ipv4.tcp_rmem=4096 262144 8388608
+net.ipv4.tcp_wmem=4096 262144 8388608
 
-# Connection backlog — handle bursts of new connections
+# ── ACK behaviour — send ACKs immediately (no delayed-ACK buildup)
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_dsack=1
+net.ipv4.tcp_window_scaling=1
+
+# ── Connection handling — handle large bursts gracefully
 net.core.netdev_max_backlog=65536
 net.ipv4.tcp_max_syn_backlog=65536
 net.core.somaxconn=65536
 
-# Throughput optimizations
-net.ipv4.tcp_window_scaling=1
+# ── Latency tuning
 net.ipv4.tcp_slow_start_after_idle=0
 net.ipv4.tcp_mtu_probing=1
 net.ipv4.tcp_tw_reuse=1
 net.ipv4.ip_local_port_range=1024 65535
+net.ipv4.tcp_fin_timeout=15
 EOF
     sysctl --system >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1 || true
     _msg_ok "BBR active. cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"

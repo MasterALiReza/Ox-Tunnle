@@ -31,8 +31,8 @@ if _log_env:
 # --------- Tunables ----------
 DIAL_TIMEOUT   = 5
 KEEPALIVE_SECS = 20
-SOCKBUF        = 16 * 1024 * 1024   # 16 MB kernel TCP buffer
-BUF_COPY       = 1  * 1024 * 1024   # 1 MB userspace copy buffer (fewer syscalls)
+SOCKBUF        = 4 * 1024 * 1024    # 4 MB — balanced buffer, avoids bufferbloat
+BUF_COPY       = 64 * 1024           # 64 KB — small buffer = faster forwarding of proxy packets
 POOL_WAIT      = 2                   # seconds to wait for a pool conn before dropping user
 SYNC_INTERVAL  = 3
 MAX_SYNC_CONNS = 50
@@ -119,18 +119,32 @@ def is_socket_alive(s: socket.socket) -> bool:
 
 
 def tune_tcp(sock: socket.socket):
-    """Apply TCP socket options.
-    Always uses TCP_NODELAY for low latency (critical for proxies).
+    """Apply TCP socket options for minimum latency.
+
+    TCP_NODELAY  — disables Nagle's algorithm (no packet coalescing).
+    TCP_QUICKACK — disables delayed-ACK (eliminates the kernel's 40 ms
+                   ACK delay per hop; Linux resets it after each recv so
+                   pipe() re-applies it on every iteration).
+    Both are critical for proxy tunnels where every hop multiplies latency.
     """
+    # Disable Nagle's algorithm: send each packet immediately.
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except Exception:
         pass
+    # Disable delayed-ACK: ACK every segment instantly.
+    try:
+        if hasattr(socket, "TCP_QUICKACK"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+    except Exception:
+        pass
+    # Socket-level read/write buffers.
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKBUF)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKBUF)
     except Exception:
         pass
+    # TCP keepalive — detect dead connections early.
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         if hasattr(socket, "TCP_KEEPIDLE"):
@@ -164,12 +178,23 @@ def recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
 
 
 def pipe(a: socket.socket, b: socket.socket):
+    """Forward bytes from socket a to socket b.
+    Re-applies TCP_QUICKACK after every recv because Linux resets it
+    automatically — without this the kernel reverts to delayed-ACK.
+    """
     buf = bytearray(BUF_COPY)
+    _quickack = hasattr(socket, "TCP_QUICKACK")
     try:
         while True:
             n = a.recv_into(buf)
             if n <= 0:
                 break
+            # Re-apply QUICKACK: Linux resets it after each recv() call.
+            if _quickack:
+                try:
+                    a.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
+                except Exception:
+                    pass
             b.sendall(memoryview(buf)[:n])
     except Exception:
         pass
