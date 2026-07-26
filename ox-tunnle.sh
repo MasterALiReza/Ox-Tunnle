@@ -54,41 +54,35 @@ fetch_url_to() {
 
 is_installed() { [[ -x "$INSTALL_PATH" ]]; }
 
-_sanitize_env_file() {
+
+# ── Safe profile loader (NEVER uses 'source') ─────────────────
+# Reads key=value pairs line by line without executing any code.
+# Immune to set -euo pipefail + unquoted values with spaces.
+# Call: _load_profile "$f"
+# Sets: ROLE IRAN_IP BRIDGE SYNC AUTO_SYNC PORTS LABEL
+_load_profile() {
   local f="$1"
-  [[ -f "$f" ]] || return 0
-  local tmp; tmp="$(mktemp)"
+  [[ -f "$f" ]] || return 1
+  # Reset all expected variables first
+  ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL=""
+  local line key val
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]]; then
-      echo "$line" >> "$tmp"
-      continue
-    fi
-    if [[ "$line" =~ ^([A-Za-z0-9_]+)=(.*)$ ]]; then
-      local key="${BASH_REMATCH[1]}"
-      local val="${BASH_REMATCH[2]}"
-      val="${val#\"}"
-      val="${val%\"}"
-      val="${val#\'}"
-      val="${val%\'}"
-      val="$(echo "$val" | tr -d '"\\')"
-      echo "${key}=\"${val}\"" >> "$tmp"
-    else
-      echo "$line" >> "$tmp"
+    # skip blank lines and comments
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    # match KEY=VALUE (value may or may not be quoted)
+    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      val="${BASH_REMATCH[2]}"
+      # strip surrounding double/single quotes
+      val="${val#\"}" ; val="${val%\"}"
+      val="${val#\'}" ; val="${val%\'}"
+      printf -v "$key" '%s' "$val"
     fi
   done < "$f"
-  mv "$tmp" "$f"
-}
-
-_sanitize_all_envs() {
-  mkdir -p "$CONF"
-  for f in "$CONF"/*.env; do
-    [[ -f "$f" ]] && _sanitize_env_file "$f"
-  done
 }
 
 ensure() {
   mkdir -p "$CONF" "$LOG_DIR" "$(dirname "$PY")"
-  _sanitize_all_envs
   have screen  || apt_try_install screen
   have python3 || apt_try_install python3
   have curl    || apt_try_install curl
@@ -100,6 +94,7 @@ ensure() {
   fi
   [[ -f "$PY" ]] || { echo "ERROR: Missing $PY"; exit 1; }
 }
+
 
 # ── UI helpers ────────────────────────────────────────────────
 _hr()   { echo -e "  ${DIM}$(printf '─%.0s' $(seq 1 56))${R}"; }
@@ -221,9 +216,7 @@ _stop_slot() {
 _run_slot() {
   local prof="$1" f="$CONF/${prof}.env"
   [[ -f "$f" ]] || { _msg_warn "Profile not found: $prof"; return 1; }
-  _sanitize_env_file "$f"
-  # shellcheck disable=SC1090
-  source "$f" 2>/dev/null || true
+  _load_profile "$f"
   local s; s="$(_session_name "$prof")"
   local log_file="${LOG_DIR}/${prof}.log"
   mkdir -p "$LOG_DIR"
@@ -265,9 +258,8 @@ _restart_slot() {
 _get_slot_details() {
   local f="$CONF/${1}.env"
   [[ -f "$f" ]] || { echo "–"; return; }
-  # shellcheck disable=SC1090
   local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" LABEL=""
-  source "$f" 2>/dev/null || true
+  _load_profile "$f"
   local lbl_prefix=""
   [[ -n "$LABEL" ]] && lbl_prefix="[${LABEL}] "
   if [[ "$ROLE" == "eu" ]]; then
@@ -322,9 +314,8 @@ _delete_slot() {
 _status_slot() {
   local prof="$1" f="$CONF/${prof}.env"
   [[ -f "$f" ]] || { _msg_warn "Profile not found."; return 1; }
-  # shellcheck disable=SC1090
   local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" PORTS="" LABEL=""
-  source "$f" 2>/dev/null || true
+  _load_profile "$f"
   local st_c="$RED" st_i="○" st_t="Stopped"
   if _is_running "$prof"; then st_c="$GRN"; st_i="●"; st_t="Running"; fi
   echo ""
@@ -352,7 +343,7 @@ _edit_profile() {
   _hr
   # Pre-fill from existing config if editing
   local ROLE="$role" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL=""
-  [[ -f "$f" ]] && { source "$f" 2>/dev/null || true; } || true
+  [[ -f "$f" ]] && _load_profile "$f" || true
 
   local label_raw
   read -r -p "  Tunnel Label/Name (optional, press Enter to keep '${LABEL:-none}'): " label_raw < /dev/tty || true
@@ -411,7 +402,7 @@ _rename_label() {
   local prof="$1" f="$CONF/${prof}.env"
   [[ -f "$f" ]] || return 1
   local LABEL=""
-  source "$f" 2>/dev/null || true
+  _load_profile "$f"
   echo ""
   _msg_info "Current Label for '${prof}': ${LABEL:-none}"
   local new_label
@@ -522,8 +513,18 @@ is_running(){ local s; s="$(session_name "$1")"; screen -ls 2>/dev/null | grep -
 start_from_profile(){
   local prof="$1" f="${CONF}/${prof}.env"
   [[ -f "$f" ]] || return 0
-  # shellcheck disable=SC1090
-  source "$f" 2>/dev/null || true
+  # Safe inline parser — avoids 'source' which breaks with set -e + unquoted values
+  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL=""
+  local _line _key _val
+  while IFS= read -r _line || [[ -n "$_line" ]]; do
+    [[ -z "$_line" || "$_line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$_line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      _key="${BASH_REMATCH[1]}"; _val="${BASH_REMATCH[2]}"
+      _val="${_val#\"}" ; _val="${_val%\"}"
+      _val="${_val#\'" ; _val="${_val%\'}"
+      printf -v "$_key" '%s' "$_val"
+    fi
+  done < "$f"
   local s; s="$(session_name "$prof")"
   local log_file="${LOG_DIR}/${prof}.log"
   mkdir -p "$LOG_DIR"
@@ -623,7 +624,7 @@ _print_all_slots() {
     # Read label in a subshell to avoid polluting globals across iterations
     local lbl st_c="$DIM" st_t="(empty)"
     if [[ -f "$CONF/${prof}.env" ]]; then
-      lbl="$(source "$CONF/${prof}.env" 2>/dev/null; echo "${LABEL:-}")"
+      _load_profile "$CONF/${prof}.env"; lbl="${LABEL:-}"
       st_c="$YLW"; st_t="saved"
       if _is_running "$prof"; then st_c="$GRN"; st_t="● running"; fi
     else
@@ -647,7 +648,7 @@ _print_all_slots() {
     n=$((n + 1))
     local lbl st_c="$DIM" st_t="(empty)"
     if [[ -f "$CONF/${prof}.env" ]]; then
-      lbl="$(source "$CONF/${prof}.env" 2>/dev/null; echo "${LABEL:-}")"
+      _load_profile "$CONF/${prof}.env"; lbl="${LABEL:-}"
       st_c="$YLW"; st_t="saved"
       if _is_running "$prof"; then st_c="$GRN"; st_t="● running"; fi
     else
@@ -758,10 +759,9 @@ _manage_slot_menu() {
   local prof="$1"
   while true; do
     local f="$CONF/${prof}.env"
-    # Read label safely in subshell to avoid polluting outer scope
     local LABEL=""
     if [[ -f "$f" ]]; then
-      LABEL="$(source "$f" 2>/dev/null; echo "${LABEL:-}")"
+      _load_profile "$f"
     fi
     clear || true
     _dhr
