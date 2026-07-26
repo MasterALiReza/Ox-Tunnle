@@ -472,13 +472,27 @@ _optimize_server() {
     sysctl -w net.core.default_qdisc=fq          >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
     cat > /etc/sysctl.d/99-ox-tunnle.conf <<'EOF'
-# Ox Tunnle — network tuning
+# Ox Tunnle — high-bandwidth network tuning
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
-net.core.rmem_max=16777216
-net.core.wmem_max=16777216
-net.ipv4.tcp_rmem=4096 87380 16777216
-net.ipv4.tcp_wmem=4096 65536 16777216
+
+# TCP send/receive buffer — match Python SOCKBUF = 16 MB
+net.core.rmem_max=33554432
+net.core.wmem_max=33554432
+net.ipv4.tcp_rmem=4096 1048576 33554432
+net.ipv4.tcp_wmem=4096 1048576 33554432
+
+# Connection backlog — handle bursts of new connections
+net.core.netdev_max_backlog=65536
+net.ipv4.tcp_max_syn_backlog=65536
+net.core.somaxconn=65536
+
+# Throughput optimizations
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.ip_local_port_range=1024 65535
 EOF
     sysctl --system >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1 || true
     _msg_ok "BBR active. cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"

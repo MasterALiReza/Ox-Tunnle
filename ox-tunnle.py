@@ -31,11 +31,11 @@ if _log_env:
 # --------- Tunables ----------
 DIAL_TIMEOUT   = 5
 KEEPALIVE_SECS = 20
-SOCKBUF        = 8 * 1024 * 1024
-BUF_COPY       = 256 * 1024
-POOL_WAIT      = 5
+SOCKBUF        = 16 * 1024 * 1024   # 16 MB kernel TCP buffer
+BUF_COPY       = 1  * 1024 * 1024   # 1 MB userspace copy buffer (fewer syscalls)
+POOL_WAIT      = 2                   # seconds to wait for a pool conn before dropping user
 SYNC_INTERVAL  = 3
-MAX_SYNC_CONNS = 50   # FIX BUG-6: max concurrent sync connections
+MAX_SYNC_CONNS = 50
 
 # --------- Graceful shutdown (FIX BUG-1) ----------
 _stop_event = threading.Event()
@@ -88,7 +88,7 @@ def auto_pool_size(role: str = "ir") -> int:
     pool      = min(fd_based, ram_based)
 
     if pool < 50:  pool = 50
-    if pool > 400: pool = 400  # FIX CPU-SPIKE: was 2000; 400 is ample and avoids thundering-herd
+    if pool > 800: pool = 800   # higher cap = more pre-warmed connections
     return pool
 
 
@@ -118,9 +118,19 @@ def is_socket_alive(s: socket.socket) -> bool:
             pass
 
 
-def tune_tcp(sock: socket.socket):
+def tune_tcp(sock: socket.socket, bulk: bool = True):
+    """Apply TCP socket options.
+    bulk=True  → TCP_CORK (coalesce writes) for high-throughput data streams.
+    bulk=False → TCP_NODELAY for low-latency interactive/control connections.
+    """
     try:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if bulk:
+            # TCP_CORK: hold small writes until buffer fills or cork is released.
+            # Better throughput on high-latency links (EU↔Iran).
+            if hasattr(socket, "TCP_CORK"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_CORK, 1)
+        else:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except Exception:
         pass
     try:
@@ -140,9 +150,9 @@ def tune_tcp(sock: socket.socket):
         pass
 
 
-def dial_tcp(host, port):
+def dial_tcp(host, port, bulk: bool = True):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    tune_tcp(s)
+    tune_tcp(s, bulk=bulk)
     s.settimeout(DIAL_TIMEOUT)
     s.connect((host, port))
     s.settimeout(None)
@@ -260,7 +270,7 @@ def eu_mode(iran_ip: str, bridge_port: int, sync_port: int, pool_size: int):
         with SYNC_INTERVAL to avoid sendall racing with the next cycle."""
         while not _stop_event.is_set():
             try:
-                c = dial_tcp(iran_ip, sync_port)
+                c = dial_tcp(iran_ip, sync_port, bulk=False)   # control connection: low-latency
             except Exception:
                 _stop_event.wait(SYNC_INTERVAL)
                 continue
@@ -284,7 +294,7 @@ def eu_mode(iran_ip: str, bridge_port: int, sync_port: int, pool_size: int):
         delay = 0.2
         while not _stop_event.is_set():
             try:
-                conn = dial_tcp(iran_ip, bridge_port)
+                conn = dial_tcp(iran_ip, bridge_port, bulk=False)  # control handshake
                 hdr  = recv_exact(conn, 2)
                 if not hdr:
                     conn.close()
