@@ -31,9 +31,9 @@ if _log_env:
 # --------- Tunables ----------
 DIAL_TIMEOUT   = 5
 KEEPALIVE_SECS = 20
-SOCKBUF        = 4 * 1024 * 1024    # 4 MB — balanced buffer, avoids bufferbloat
-BUF_COPY       = 64 * 1024           # 64 KB — small buffer = faster forwarding of proxy packets
-POOL_WAIT      = 2                   # seconds to wait for a pool conn before dropping user
+SOCKBUF        = 8 * 1024 * 1024    # 8 MB standard socket buffer
+BUF_COPY       = 256 * 1024          # 256 KB userspace buffer
+POOL_WAIT      = 5                   # 5 seconds pool wait
 SYNC_INTERVAL  = 3
 MAX_SYNC_CONNS = 50
 
@@ -87,30 +87,24 @@ def auto_pool_size(role: str = "ir") -> int:
     ram_based = int((mem_mb / 1024) * 250) if mem_mb else 500
     pool      = min(fd_based, ram_based)
 
-    if pool < 50:  pool = 50
-    if pool > 2000: pool = 2000   # higher cap for more concurrent proxy connections
+    if pool < 100:  pool = 100
+    if pool > 2000: pool = 2000
     return pool
 
 
 # --------- Socket helpers ----------
 
 def is_socket_alive(s: socket.socket) -> bool:
-    """Best-effort check to avoid using dead sockets from the pool.
-
-    FIX BUG-3: removed unreachable `return True` and fixed exception
-    handling — unknown exceptions now correctly return False (dead socket)
-    instead of silently returning True.
-    """
     try:
         s.setblocking(False)
         data = s.recv(1, socket.MSG_PEEK)
         if data == b"":
-            return False   # Peer closed the connection cleanly
+            return False   # Peer closed connection
         return True
     except BlockingIOError:
-        return True        # No data ready yet — socket is alive
+        return True        # Alive
     except Exception:
-        return False       # Connection reset, broken pipe, etc.
+        return False
     finally:
         try:
             s.setblocking(True)
@@ -119,32 +113,16 @@ def is_socket_alive(s: socket.socket) -> bool:
 
 
 def tune_tcp(sock: socket.socket):
-    """Apply TCP socket options for minimum latency.
-
-    TCP_NODELAY  — disables Nagle's algorithm (no packet coalescing).
-    TCP_QUICKACK — disables delayed-ACK (eliminates the kernel's 40 ms
-                   ACK delay per hop; Linux resets it after each recv so
-                   pipe() re-applies it on every iteration).
-    Both are critical for proxy tunnels where every hop multiplies latency.
-    """
-    # Disable Nagle's algorithm: send each packet immediately.
+    """Apply standard high-performance TCP socket options."""
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except Exception:
         pass
-    # Disable delayed-ACK: ACK every segment instantly.
-    try:
-        if hasattr(socket, "TCP_QUICKACK"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
-    except Exception:
-        pass
-    # Socket-level read/write buffers.
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKBUF)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKBUF)
     except Exception:
         pass
-    # TCP keepalive — detect dead connections early.
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         if hasattr(socket, "TCP_KEEPIDLE"):
@@ -167,7 +145,7 @@ def dial_tcp(host, port):
 
 
 def recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
-    """Receive exactly n bytes or return None if the connection closes."""
+    """Receive exactly n bytes or return None if connection closes."""
     data = bytearray()
     while len(data) < n:
         chunk = sock.recv(n - len(data))
@@ -178,23 +156,12 @@ def recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
 
 
 def pipe(a: socket.socket, b: socket.socket):
-    """Forward bytes from socket a to socket b.
-    Re-applies TCP_QUICKACK after every recv because Linux resets it
-    automatically — without this the kernel reverts to delayed-ACK.
-    """
     buf = bytearray(BUF_COPY)
-    _quickack = hasattr(socket, "TCP_QUICKACK")
     try:
         while True:
             n = a.recv_into(buf)
             if n <= 0:
                 break
-            # Re-apply QUICKACK: Linux resets it after each recv() call.
-            if _quickack:
-                try:
-                    a.setsockopt(socket.IPPROTO_TCP, socket.TCP_QUICKACK, 1)
-                except Exception:
-                    pass
             b.sendall(memoryview(buf)[:n])
     except Exception:
         pass
