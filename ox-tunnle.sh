@@ -146,17 +146,6 @@ _fetch_server_info() {
   _CACHE_READY=1
 }
 
-_get_location() {
-  city="$(_get_ipinfo_field city "$ip")"
-  country="$(_get_ipinfo_field country "$ip")"
-  [[ -n "$city$country" ]] && echo "${city}${city:+, }${country}" || echo "Unknown"
-}
-_get_datacenter() {
-  local ip; ip="$(_get_public_ip)"
-  local org; org="$(_get_ipinfo_field org "$ip")"
-  [[ -n "$org" ]] && echo "$org" || echo "Unknown"
-}
-
 # ── Input validation ──────────────────────────────────────────
 _validate_ip() {
   local ip="$1"
@@ -428,38 +417,51 @@ _rename_label() {
 
 # ── Script management ─────────────────────────────────────────
 _install_script() {
-  _msg_info "Installing to: $INSTALL_PATH"
-  mkdir -p "$(dirname "$INSTALL_PATH")"
+  _msg_info "Installing bash script to: $INSTALL_PATH"
+  mkdir -p "$(dirname "$INSTALL_PATH")" "$(dirname "$PY")"
   if [[ -f "$0" && "$0" != "bash" && "$0" != "/dev/fd/"* ]]; then
     cp -f "$0" "$INSTALL_PATH"
   else
     fetch_url_to "$SELF_URL" "$INSTALL_PATH"
   fi
   chmod +x "$INSTALL_PATH"
+
+  _msg_info "Installing python core to: $PY"
+  fetch_url_to "$PY_URL" "$PY"
+  chmod +x "$PY"
   _msg_ok "Installed. Run: sudo ox-tunnle"
 }
 
 _update_script() {
-  _msg_info "Updating from: $SELF_URL"
+  _msg_info "Updating bash script & python core from GitHub..."
   local tmp; tmp="$(mktemp)"
   fetch_url_to "$SELF_URL" "$tmp"
-  [[ -s "$tmp" ]] || { _msg_err "Update failed: empty download."; rm -f "$tmp"; return 1; }
+  [[ -s "$tmp" ]] || { _msg_err "Update failed: empty download for $SCRIPT_FILENAME."; rm -f "$tmp"; return 1; }
   head -n 1 "$tmp" | grep -qE "^#!.*bash" || {
     _msg_err "Update failed: not a valid bash script."; rm -f "$tmp"; return 1
   }
-  chmod +x "$tmp"
+
+  local tmp_py; tmp_py="$(mktemp)"
+  fetch_url_to "$PY_URL" "$tmp_py"
+  [[ -s "$tmp_py" ]] || { _msg_err "Update failed: empty download for ox-tunnle.py."; rm -f "$tmp" "$tmp_py"; return 1; }
+
+  chmod +x "$tmp" "$tmp_py"
+  mkdir -p "$(dirname "$PY")"
+  mv -f "$tmp_py" "$PY"
+  chmod +x "$PY"
+
   if is_installed; then
     mv -f "$tmp" "$INSTALL_PATH"; chmod +x "$INSTALL_PATH"
-    _msg_ok "Updated. Run: sudo ox-tunnle"
+    _msg_ok "Updated successfully. Run: sudo ox-tunnle"
   else
     mv -f "$tmp" "./${SCRIPT_FILENAME}"; chmod +x "./${SCRIPT_FILENAME}"
-    _msg_ok "Saved locally: ./${SCRIPT_FILENAME}"
+    _msg_ok "Updated local file and $PY successfully."
   fi
 }
 
 _uninstall_script() {
   _disable_cron >/dev/null 2>&1 || true
-  rm -f "$HC_SCRIPT" "$INSTALL_PATH"
+  rm -f "$HC_SCRIPT" "$INSTALL_PATH" "$PY"
   _msg_ok "Uninstalled."
 }
 
