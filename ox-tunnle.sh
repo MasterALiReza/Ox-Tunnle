@@ -232,12 +232,14 @@ _get_slot_details() {
   local f="$CONF/${1}.env"
   [[ -f "$f" ]] || { echo "–"; return; }
   # shellcheck disable=SC1090
-  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC=""
+  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" LABEL=""
   source "$f" 2>/dev/null || true
+  local lbl_prefix=""
+  [[ -n "$LABEL" ]] && lbl_prefix="[${LABEL}] "
   if [[ "$ROLE" == "eu" ]]; then
-    echo "→ ${IRAN_IP} | bridge:${BRIDGE} sync:${SYNC}"
+    echo "${lbl_prefix}→ ${IRAN_IP} | bridge:${BRIDGE} sync:${SYNC}"
   else
-    echo "bridge:${BRIDGE} sync:${SYNC} autosync:${AUTO_SYNC:-true}"
+    echo "${lbl_prefix}bridge:${BRIDGE} sync:${SYNC} autosync:${AUTO_SYNC:-true}"
   fi
 }
 
@@ -287,12 +289,15 @@ _status_slot() {
   local prof="$1" f="$CONF/${prof}.env"
   [[ -f "$f" ]] || { _msg_warn "Profile not found."; return 1; }
   # shellcheck disable=SC1090
-  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" PORTS=""
+  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" PORTS="" LABEL=""
   source "$f" 2>/dev/null || true
   local st_c="$RED" st_i="○" st_t="Stopped"
   if _is_running "$prof"; then st_c="$GRN"; st_i="●"; st_t="Running"; fi
   echo ""
-  echo -e "  ${CYN}Profile${R} : ${B}${prof}${R}  ${CYN}Role${R}: ${B}${ROLE^^}${R}"
+  echo -e "  ${CYN}Profile${R} : ${B}${prof}${R}${LABEL:+  ${DIM}[${LABEL}]${R}}  ${CYN}Role${R}: ${B}${ROLE^^}${R}"
+  if [[ -n "$LABEL" ]]; then
+    echo -e "  ${CYN}Label${R}   : ${B}${LABEL}${R}"
+  fi
   if [[ "$ROLE" == "eu" ]]; then
     echo -e "  ${CYN}Iran IP${R} : ${IRAN_IP:-–}"
     echo -e "  ${CYN}Bridge${R}  : ${BRIDGE:-–}   ${CYN}Sync${R}: ${SYNC:-–}"
@@ -311,8 +316,14 @@ _edit_profile() {
   echo -e "  ${CYN}${B}Configure:${R} ${B}$prof${R}  ${DIM}(role: ${role^^})${R}"
   _hr
   # Pre-fill from existing config if editing
-  local ROLE="$role" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS=""
+  local ROLE="$role" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL=""
   [[ -f "$f" ]] && { source "$f" 2>/dev/null || true; } || true
+
+  local label_raw
+  read -r -p "  Tunnel Label/Name (optional, press Enter to keep '${LABEL:-none}'): " label_raw < /dev/tty || true
+  if [[ -n "$label_raw" ]]; then
+    LABEL="$(echo "$label_raw" | tr -d '"'\''\\' | cut -c1-30)"
+  fi
 
   if [[ "$role" == "eu" ]]; then
     IRAN_IP="$(_read_ip    "Iran server IP")"
@@ -323,6 +334,7 @@ _edit_profile() {
     fi
     cat > "$f" <<EOF
 ROLE=eu
+LABEL=${LABEL}
 IRAN_IP=${IRAN_IP}
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
@@ -338,6 +350,7 @@ EOF
     if [[ "${as_choice,,}" == "y" ]]; then
       cat > "$f" <<EOF
 ROLE=iran
+LABEL=${LABEL}
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 AUTO_SYNC=true
@@ -348,6 +361,7 @@ EOF
       PORTS="${ports_raw//[^0-9,]/}"
       cat > "$f" <<EOF
 ROLE=iran
+LABEL=${LABEL}
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 AUTO_SYNC=false
@@ -356,6 +370,29 @@ EOF
     fi
   fi
   _msg_ok "Saved: $f"
+}
+
+_rename_label() {
+  local prof="$1" f="$CONF/${prof}.env"
+  [[ -f "$f" ]] || return 1
+  local LABEL=""
+  source "$f" 2>/dev/null || true
+  echo ""
+  _msg_info "Current Label for '${prof}': ${LABEL:-none}"
+  local new_label
+  read -r -p "  Enter new label (or type 'clear' to remove): " new_label < /dev/tty || true
+  if [[ "${new_label,,}" == "clear" ]]; then
+    new_label=""
+  else
+    new_label="$(echo "$new_label" | tr -d '"'\''\\' | cut -c1-30)"
+  fi
+
+  if grep -q "^LABEL=" "$f"; then
+    sed -i "s/^LABEL=.*/LABEL=${new_label}/" "$f"
+  else
+    echo "LABEL=${new_label}" >> "$f"
+  fi
+  _msg_ok "Label updated for $prof"
 }
 
 # ── Script management ─────────────────────────────────────────
@@ -535,39 +572,45 @@ _print_all_slots() {
 
   # ── EU Servers (slots 1-10) ──
   echo ""
-  echo -e "  ${CYN}${B}┌─────────────────────────────────────┐${R}"
-  echo -e "  ${CYN}${B}│   🌍  EU SERVERS  (slots 1 – 10)    │${R}"
-  echo -e "  ${CYN}${B}└─────────────────────────────────────┘${R}"
-  echo -e "  ${DIM}  #   Name        Status${R}"
+  echo -e "  ${CYN}${B}┌───────────────────────────────────────────────┐${R}"
+  echo -e "  ${CYN}${B}│   🌍  EU SERVERS  (slots 1 – 10)              │${R}"
+  echo -e "  ${CYN}${B}└───────────────────────────────────────────────┘${R}"
+  echo -e "  ${DIM}  #   Name        Label                 Status${R}"
   _hr
   for i in $(seq 1 "$MAX"); do
     local prof="eu${i}"
     n=$((n + 1))
-    local st_c="$DIM" st_t="(empty)"
+    local st_c="$DIM" st_t="(empty)" LABEL=""
     if [[ -f "$CONF/${prof}.env" ]]; then
+      source "$CONF/${prof}.env" 2>/dev/null || true
       st_c="$YLW"; st_t="saved"
       if _is_running "$prof"; then st_c="$GRN"; st_t="● running"; fi
     fi
-    printf "  ${CYN}${B}%3s${R}   %-12s${st_c}%s${R}\n" "$n" "$prof" "$st_t"
+    local lbl_disp="${LABEL:--}"
+    [[ ${#lbl_disp} -gt 20 ]] && lbl_disp="${lbl_disp:0:17}..."
+    printf "  ${CYN}${B}%3s${R}   %-11s %-21s ${st_c}%s${R}\n" "$n" "$prof" "$lbl_disp" "$st_t"
   done
   _hr
 
   # ── IRAN Servers (slots 11-20) ──
   echo ""
-  echo -e "  ${CYN}${B}┌─────────────────────────────────────┐${R}"
-  echo -e "  ${CYN}${B}│   🇮🇷  IRAN SERVERS  (slots 11 – 20) │${R}"
-  echo -e "  ${CYN}${B}└─────────────────────────────────────┘${R}"
-  echo -e "  ${DIM}  #   Name        Status${R}"
+  echo -e "  ${CYN}${B}┌───────────────────────────────────────────────┐${R}"
+  echo -e "  ${CYN}${B}│   🇮🇷  IRAN SERVERS  (slots 11 – 20)           │${R}"
+  echo -e "  ${CYN}${B}└───────────────────────────────────────────────┘${R}"
+  echo -e "  ${DIM}  #   Name        Label                 Status${R}"
   _hr
   for i in $(seq 1 "$MAX"); do
     local prof="iran${i}"
     n=$((n + 1))
-    local st_c="$DIM" st_t="(empty)"
+    local st_c="$DIM" st_t="(empty)" LABEL=""
     if [[ -f "$CONF/${prof}.env" ]]; then
+      source "$CONF/${prof}.env" 2>/dev/null || true
       st_c="$YLW"; st_t="saved"
       if _is_running "$prof"; then st_c="$GRN"; st_t="● running"; fi
     fi
-    printf "  ${CYN}${B}%3s${R}   %-12s${st_c}%s${R}\n" "$n" "$prof" "$st_t"
+    local lbl_disp="${LABEL:--}"
+    [[ ${#lbl_disp} -gt 20 ]] && lbl_disp="${lbl_disp:0:17}..."
+    printf "  ${CYN}${B}%3s${R}   %-11s %-21s ${st_c}%s${R}\n" "$n" "$prof" "$lbl_disp" "$st_t"
   done
   _hr
 }
@@ -631,13 +674,49 @@ _saved_idx_to_prof() {
 #  MENUS
 # ════════════════════════════════════════════════════════════
 
+# ── Bulk Operations ───────────────────────────────────────────
+_bulk_start_all() {
+  echo ""
+  _msg_info "Starting all saved tunnels..."
+  local profs=($(_list_saved_profiles))
+  [[ ${#profs[@]} -eq 0 ]] && { _msg_warn "No saved profiles."; return; }
+  for prof in "${profs[@]}"; do
+    _run_slot "$prof"
+  done
+  _msg_ok "Bulk start completed."
+}
+
+_bulk_stop_all() {
+  echo ""
+  _msg_info "Stopping all saved tunnels..."
+  local profs=($(_list_saved_profiles))
+  [[ ${#profs[@]} -eq 0 ]] && { _msg_warn "No saved profiles."; return; }
+  for prof in "${profs[@]}"; do
+    _stop_slot "$prof"
+  done
+  _msg_ok "Bulk stop completed."
+}
+
+_bulk_restart_all() {
+  echo ""
+  _msg_info "Restarting all saved tunnels..."
+  local profs=($(_list_saved_profiles))
+  [[ ${#profs[@]} -eq 0 ]] && { _msg_warn "No saved profiles."; return; }
+  for prof in "${profs[@]}"; do
+    _restart_slot "$prof"
+  done
+  _msg_ok "Bulk restart completed."
+}
+
 # ── Manage single slot ────────────────────────────────────────
 _manage_slot_menu() {
   local prof="$1"
   while true; do
+    local f="$CONF/${prof}.env" LABEL=""
+    [[ -f "$f" ]] && source "$f" 2>/dev/null || true
     clear || true
     _dhr
-    echo -e "  ${CYN}${B}  ⚙  MANAGE TUNNEL${R}  ${DIM}— $prof${R}"
+    echo -e "  ${CYN}${B}  ⚙  MANAGE TUNNEL${R}  ${DIM}— $prof${LABEL:+ [$LABEL]}${R}"
     _dhr
     _status_slot "$prof"
     _section "ACTIONS"
@@ -649,7 +728,8 @@ _manage_slot_menu() {
     _menu_item "5" "📜  View Live Log"
     _section "CONFIG"
     _menu_item "6" "✏   Edit Profile"
-    _menu_item "7" "🗑   Delete Slot"
+    _menu_item "7" "🏷   Rename Label"
+    _menu_item "8" "🗑   Delete Slot"
     echo ""
     _hr
     _menu_item "0" "◀  Back"
@@ -662,7 +742,8 @@ _manage_slot_menu() {
       4) _status_slot "$prof"; pause ;;
       5) _logs_slot "$prof" ;;
       6) _edit_profile "$prof"; pause ;;
-      7) _delete_slot "$prof"; pause; return ;;  # return after delete
+      7) _rename_label "$prof"; pause ;;
+      8) _delete_slot "$prof"; pause; return ;;  # return after delete
       0) return ;;
       *) _msg_warn "Invalid option."; sleep 0.8 ;;
     esac
@@ -701,14 +782,33 @@ _manage_tunnels_menu() {
     _dhr
     _print_saved_profiles || { pause; return; }
     echo ""
+    _section "BULK ACTIONS"
+    _menu_item "S" "▶  Start All Tunnels"
+    _menu_item "K" "⏹  Stop All Tunnels"
+    _menu_item "R" "↺  Restart All Tunnels"
+    echo ""
+    _hr
     _menu_item "0" "◀  Back"
     _hr; echo ""
-    local choice; read -r -p "  Select tunnel number or 0: " choice < /dev/tty
-    [[ "$choice" =~ ^[0-9]+$ ]] || { _msg_warn "Enter a number."; sleep 0.8; continue; }
-    [[ "$choice" -eq 0 ]] && return
-    local prof; prof="$(_saved_idx_to_prof "$choice")"
-    [[ -n "$prof" ]] || { _msg_warn "Invalid selection."; sleep 0.8; continue; }
-    _manage_slot_menu "$prof"
+    local choice; read -r -p "  Select tunnel number, action (S/K/R), or 0: " choice < /dev/tty
+    case "${choice,,}" in
+      0) return ;;
+      s) _bulk_start_all; pause ;;
+      k) _bulk_stop_all; pause ;;
+      r) _bulk_restart_all; pause ;;
+      *)
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+          local prof; prof="$(_saved_idx_to_prof "$choice")"
+          if [[ -n "$prof" ]]; then
+            _manage_slot_menu "$prof"
+          else
+            _msg_warn "Invalid selection."; sleep 0.8
+          fi
+        else
+          _msg_warn "Invalid option."; sleep 0.8
+        fi
+        ;;
+    esac
   done
 }
 
