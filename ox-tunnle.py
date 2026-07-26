@@ -88,7 +88,7 @@ def auto_pool_size(role: str = "ir") -> int:
     pool      = min(fd_based, ram_based)
 
     if pool < 50:  pool = 50
-    if pool > 800: pool = 800   # higher cap = more pre-warmed connections
+    if pool > 2000: pool = 2000   # higher cap for more concurrent proxy connections
     return pool
 
 
@@ -118,19 +118,12 @@ def is_socket_alive(s: socket.socket) -> bool:
             pass
 
 
-def tune_tcp(sock: socket.socket, bulk: bool = True):
+def tune_tcp(sock: socket.socket):
     """Apply TCP socket options.
-    bulk=True  → TCP_CORK (coalesce writes) for high-throughput data streams.
-    bulk=False → TCP_NODELAY for low-latency interactive/control connections.
+    Always uses TCP_NODELAY for low latency (critical for proxies).
     """
     try:
-        if bulk:
-            # TCP_CORK: hold small writes until buffer fills or cork is released.
-            # Better throughput on high-latency links (EU↔Iran).
-            if hasattr(socket, "TCP_CORK"):
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_CORK, 1)
-        else:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     except Exception:
         pass
     try:
@@ -150,9 +143,9 @@ def tune_tcp(sock: socket.socket, bulk: bool = True):
         pass
 
 
-def dial_tcp(host, port, bulk: bool = True):
+def dial_tcp(host, port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    tune_tcp(s, bulk=bulk)
+    tune_tcp(s)
     s.settimeout(DIAL_TIMEOUT)
     s.connect((host, port))
     s.settimeout(None)
@@ -270,7 +263,7 @@ def eu_mode(iran_ip: str, bridge_port: int, sync_port: int, pool_size: int):
         with SYNC_INTERVAL to avoid sendall racing with the next cycle."""
         while not _stop_event.is_set():
             try:
-                c = dial_tcp(iran_ip, sync_port, bulk=False)   # control connection: low-latency
+                c = dial_tcp(iran_ip, sync_port)   # control connection: low-latency
             except Exception:
                 _stop_event.wait(SYNC_INTERVAL)
                 continue
@@ -294,7 +287,7 @@ def eu_mode(iran_ip: str, bridge_port: int, sync_port: int, pool_size: int):
         delay = 0.2
         while not _stop_event.is_set():
             try:
-                conn = dial_tcp(iran_ip, bridge_port, bulk=False)  # control handshake
+                conn = dial_tcp(iran_ip, bridge_port)  # control handshake
                 hdr  = recv_exact(conn, 2)
                 if not hdr:
                     conn.close()
