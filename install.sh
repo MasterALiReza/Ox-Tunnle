@@ -57,14 +57,31 @@ done
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+download_file() {
+  local filename="$1" dst="$2"
+  local urls=(
+    "https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+    "https://cdn.jsdelivr.net/gh/MasterALiReza/Ox-Tunnle@main/${filename}"
+    "https://raw.githack.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+  )
+  for url in "${urls[@]}"; do
+    if curl -fsSL --connect-timeout 6 --retry 2 "$url" -o "$dst" 2>/dev/null; then
+      if [[ -s "$dst" ]]; then
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
 info "Downloading management script..."
-if ! curl -fsSL --connect-timeout 10 --retry 3 "$MANAGER_URL" -o "$TMP/ox-tunnle"; then
-  err "Failed to download manager from GitHub. Check your internet connection."
+if ! download_file "ox-tunnle.sh" "$TMP/ox-tunnle"; then
+  err "Failed to download manager from GitHub or CDN mirrors. Check your network."
 fi
 
 info "Downloading tunnel core (Python)..."
-if ! curl -fsSL --connect-timeout 10 --retry 3 "$PY_URL" -o "$TMP/ox-tunnle.py"; then
-  err "Failed to download tunnel core from GitHub. Check your internet connection."
+if ! download_file "ox-tunnle.py" "$TMP/ox-tunnle.py"; then
+  err "Failed to download tunnel core from GitHub or CDN mirrors. Check your network."
 fi
 
 # ── Sanity checks ─────────────────────────────────────────────
