@@ -357,15 +357,22 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
     setup_signals(stop_event, loop)
 
     async def port_sync_loop():
+        last_log_time = 0
         while not stop_event.is_set():
             try:
                 reader, writer = await asyncio.open_connection(iran_ip, sync_port)
                 tune_writer(writer)
                 if not await authenticate_client_async(reader, writer, secret):
+                    log.warning(f"[SYNC] Authentication FAILED with Iran server {iran_ip}:{sync_port} (Secret mismatch or MITM).")
                     writer.close()
                     await asyncio.sleep(SYNC_INTERVAL)
                     continue
-            except Exception:
+                log.info(f"[SYNC] Connected & Authenticated with Iran server {iran_ip}:{sync_port}")
+            except Exception as e:
+                now = time.time()
+                if now - last_log_time > 15:
+                    log.warning(f"[SYNC] Cannot connect to Iran server {iran_ip}:{sync_port} -> {e}")
+                    last_log_time = now
                 await asyncio.sleep(SYNC_INTERVAL)
                 continue
 
@@ -379,18 +386,24 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                         await asyncio.wait_for(stop_event.wait(), timeout=SYNC_INTERVAL)
                     except asyncio.TimeoutError:
                         pass
-            except Exception:
+            except Exception as e:
+                log.warning(f"[SYNC] AutoSync connection lost to {iran_ip}:{sync_port}: {e}")
                 try: writer.close()
                 except Exception: pass
                 await asyncio.sleep(SYNC_INTERVAL)
 
     async def reverse_link_worker():
         delay = 0.2
+        last_log_time = 0
         while not stop_event.is_set():
             try:
                 reader, writer = await asyncio.open_connection(iran_ip, bridge_port)
                 tune_writer(writer)
                 if not await authenticate_client_async(reader, writer, secret):
+                    now = time.time()
+                    if now - last_log_time > 15:
+                        log.warning(f"[EU-WORKER] Auth FAILED on bridge {iran_ip}:{bridge_port}")
+                        last_log_time = now
                     writer.close()
                     await asyncio.sleep(2.0)
                     continue
@@ -402,7 +415,8 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                     local_reader, local_writer = await asyncio.wait_for(
                         asyncio.open_connection("127.0.0.1", target_port), timeout=5.0
                     )
-                except Exception:
+                except Exception as e:
+                    log.warning(f"[EU-WORKER] Local target port {target_port} unreachable on EU server (127.0.0.1:{target_port}): {e}")
                     try:
                         writer.close()
                     except Exception:
@@ -414,7 +428,11 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 delay = 0.2
             except asyncio.IncompleteReadError:
                 await asyncio.sleep(0.1)
-            except Exception:
+            except Exception as e:
+                now = time.time()
+                if now - last_log_time > 15:
+                    log.warning(f"[EU-WORKER] Connection error to Iran bridge {iran_ip}:{bridge_port} -> {e}")
+                    last_log_time = now
                 if not stop_event.is_set():
                     await asyncio.sleep(delay)
                     delay = min(delay * 2, 5.0)
@@ -461,15 +479,20 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
 
     async def handle_bridge_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         tune_writer(writer)
+        peer = writer.get_extra_info("peername")
+        peer_str = f"{peer[0]}:{peer[1]}" if peer else "unknown"
         if await authenticate_server_async(reader, writer, secret):
             if pool.full():
+                log.warning(f"[IR-BRIDGE] Connection from {peer_str} dropped: Pool is FULL ({pool.maxsize} connections).")
                 writer.close()
                 return
             try:
                 pool.put_nowait((reader, writer))
-            except Exception:
+            except Exception as e:
+                log.warning(f"[IR-BRIDGE] Failed to put worker from {peer_str} into pool: {e}")
                 writer.close()
         else:
+            log.warning(f"[IR-BRIDGE] Auth FAILED for incoming bridge connection from {peer_str}")
             writer.close()
 
     async def handle_user_client(user_reader: asyncio.StreamReader, user_writer: asyncio.StreamWriter, target_port: int):
@@ -492,6 +515,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                 pass
 
         if europe is None:
+            log.warning(f"[IR-TRAFFIC] Connection for port {target_port} FAILED: No EU bridge worker available in pool (Pool empty / Timeout).")
             try: user_writer.close()
             except Exception: pass
             return
@@ -500,7 +524,8 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
         try:
             eu_writer.write(struct.pack("!H", target_port))
             await asyncio.wait_for(eu_writer.drain(), timeout=5.0)
-        except Exception:
+        except Exception as e:
+            log.warning(f"[IR-TRAFFIC] Failed sending target port {target_port} header to EU worker: {e}")
             try: user_writer.close()
             except Exception: pass
             try: eu_writer.close()
@@ -544,11 +569,15 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                 pass
 
     async def handle_sync_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        peer = writer.get_extra_info("peername")
+        peer_str = f"{peer[0]}:{peer[1]}" if peer else "unknown"
         async with sync_sem:
             try:
                 if not await authenticate_server_async(reader, writer, secret):
+                    log.warning(f"[IR-SYNC] Auth FAILED for sync connection from {peer_str}")
                     writer.close()
                     return
+                log.info(f"[IR-SYNC] EU client connected & authenticated for AutoSync from {peer_str}")
                 while not stop_event.is_set():
                     try:
                         h = await asyncio.wait_for(reader.readexactly(1), timeout=KEEPALIVE_SECS * 2)

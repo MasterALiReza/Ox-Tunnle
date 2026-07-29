@@ -333,7 +333,20 @@ _view_logs() {
   # CRITICAL FIX: trap ':' catches INT in bash (so script doesn't exit) 
   # but allows child 'tail' to receive default SIGINT and terminate.
   trap ':' INT
-  tail -n 80 -f "$log_file" 2>/dev/null || true
+  if [[ -t 1 ]]; then
+    tail -n 80 -f "$log_file" 2>/dev/null | sed -u \
+      -e "s/\[ERROR\]/\x1b[1;31m[ERROR]\x1b[0m/g" \
+      -e "s/\[WARNING\]/\x1b[1;33m[WARNING]\x1b[0m/g" \
+      -e "s/\[INFO\]/\x1b[1;32m[INFO]\x1b[0m/g" \
+      -e "s/\[SECURITY\]/\x1b[1;35m[SECURITY]\x1b[0m/g" \
+      -e "s/\[SYNC\]/\x1b[1;36m[SYNC]\x1b[0m/g" \
+      -e "s/\[IR-SYNC\]/\x1b[1;36m[IR-SYNC]\x1b[0m/g" \
+      -e "s/\[IR-BRIDGE\]/\x1b[1;34m[IR-BRIDGE]\x1b[0m/g" \
+      -e "s/\[IR-TRAFFIC\]/\x1b[1;31m[IR-TRAFFIC]\x1b[0m/g" \
+      -e "s/\[EU-WORKER\]/\x1b[1;33m[EU-WORKER]\x1b[0m/g" || true
+  else
+    tail -n 80 -f "$log_file" 2>/dev/null || true
+  fi
   trap - INT
   echo ""; _msg_info "Log view ended. Tunnel is still running."
   # Remove pause so it returns immediately to the slot management menu
