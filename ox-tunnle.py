@@ -403,12 +403,10 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
     async def reverse_link_worker():
         nonlocal idle_workers, active_workers, last_conn_err_time, global_conn_error
         
-        idle_workers += 1
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(iran_ip, bridge_port), timeout=10.0
             )
-            global_conn_error = False
             tune_writer(writer)
             
             if not await authenticate_client_async(reader, writer, secret):
@@ -417,15 +415,18 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                     log.warning(f"[EU-WORKER] Auth FAILED on bridge {iran_ip}:{bridge_port}")
                     last_conn_err_time = now
                 writer.close()
-                idle_workers -= 1
                 global_conn_error = True
                 return
 
-            # Wait for target port from IR server
-            hdr = await reader.readexactly(2)
-            
+            global_conn_error = False
+            idle_workers += 1
+            try:
+                # Wait for target port from IR server
+                hdr = await reader.readexactly(2)
+            finally:
+                idle_workers -= 1
+
         except asyncio.IncompleteReadError:
-            idle_workers -= 1
             return
         except Exception as e:
             global_conn_error = True
@@ -433,11 +434,9 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             if now - last_conn_err_time > 15:
                 log.warning(f"[EU-WORKER] Connection error to Iran bridge {iran_ip}:{bridge_port} -> {e}")
                 last_conn_err_time = now
-            idle_workers -= 1
             return
 
         # Bridge active
-        idle_workers -= 1
         active_workers += 1
         
         try:
@@ -473,19 +472,20 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
 
     async def pool_manager():
         while not stop_event.is_set():
-            if global_conn_error:
-                await asyncio.sleep(2.0)
+            if global_conn_error and idle_workers > 5:
+                await asyncio.sleep(1.0)
                 
             total = idle_workers + active_workers
             if idle_workers < desired_idle and total < max_workers:
                 to_spawn = min(desired_idle - idle_workers, max_workers - total)
-                batch = min(to_spawn, 5)
+                batch_size = 25 if idle_workers < 20 else 10
+                batch = min(to_spawn, batch_size)
                 for _ in range(batch):
                     task = asyncio.create_task(reverse_link_worker())
                     worker_tasks.add(task)
                     task.add_done_callback(worker_tasks.discard)
             
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.05 if idle_workers < 10 else 0.2)
 
     sync_task = asyncio.create_task(port_sync_loop())
     manager_task = asyncio.create_task(pool_manager())
