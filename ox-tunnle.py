@@ -169,7 +169,7 @@ def setup_signals(stop_event: asyncio.Event, loop: asyncio.AbstractEventLoop):
 
 async def authenticate_client_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, secret: str) -> bool:
     """Client side (EU): perform mutual HMAC-SHA256 Challenge-Response handshake on Bridge/Sync channels."""
-    secret = (secret or "").strip()
+    secret = (secret or "").strip().strip("'\"")
     try:
         if not secret:
             writer.write(b"\x00")
@@ -201,7 +201,7 @@ async def authenticate_client_async(reader: asyncio.StreamReader, writer: asynci
 
 async def authenticate_server_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, expected_secret: str) -> bool:
     """Server side (IR): verify incoming connection with strict 10-second timeout against DoS & Scanners."""
-    expected_secret = (expected_secret or "").strip()
+    expected_secret = (expected_secret or "").strip().strip("'\"")
     try:
         async def _handshake():
             flag = await reader.readexactly(1)
