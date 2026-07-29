@@ -177,7 +177,7 @@ async def authenticate_client_async(reader: asyncio.StreamReader, writer: asynci
         await writer.drain()
 
         # Receive 16-byte server nonce + 32-byte server HMAC (48 bytes total)
-        resp = await asyncio.wait_for(reader.readexactly(48), timeout=3.0)
+        resp = await asyncio.wait_for(reader.readexactly(48), timeout=10.0)
         nonce_s, server_mac = resp[:16], resp[16:]
         expected_server_mac = hmac.new(secret.encode("utf-8"), nonce_c + nonce_s, hashlib.sha256).digest()
         if not hmac.compare_digest(server_mac, expected_server_mac):
@@ -196,7 +196,7 @@ async def authenticate_client_async(reader: asyncio.StreamReader, writer: asynci
 
 
 async def authenticate_server_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, expected_secret: str) -> bool:
-    """Server side (IR): verify incoming connection with strict 3-second timeout against DoS & Scanners."""
+    """Server side (IR): verify incoming connection with strict 10-second timeout against DoS & Scanners."""
     expected_secret = (expected_secret or "").strip()
     try:
         async def _handshake():
@@ -243,7 +243,7 @@ async def authenticate_server_async(reader: asyncio.StreamReader, writer: asynci
                 log.warning("[SECURITY] Connection dropped: unknown authentication protocol flag.")
                 return False
 
-        return await asyncio.wait_for(_handshake(), timeout=3.0)
+        return await asyncio.wait_for(_handshake(), timeout=10.0)
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
         return False
     except Exception as e:
@@ -468,13 +468,13 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             total = idle_workers + active_workers
             if idle_workers < desired_idle and total < max_workers:
                 to_spawn = min(desired_idle - idle_workers, max_workers - total)
-                batch = min(to_spawn, 10)
+                batch = min(to_spawn, 5)
                 for _ in range(batch):
                     task = asyncio.create_task(reverse_link_worker())
                     worker_tasks.add(task)
                     task.add_done_callback(worker_tasks.discard)
             
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
 
     sync_task = asyncio.create_task(port_sync_loop())
     manager_task = asyncio.create_task(pool_manager())
