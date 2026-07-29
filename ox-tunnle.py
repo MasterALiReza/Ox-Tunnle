@@ -591,8 +591,10 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                         pd = await reader.readexactly(2)
                         (p,) = struct.unpack("!H", pd)
                         current_ports.add(p)
-                        await open_port(p)
-                    await prune_inactive_ports(current_ports)
+                    if auto_sync:
+                        for p in current_ports:
+                            await open_port(p)
+                        await prune_inactive_ports(current_ports)
             except Exception:
                 pass
             finally:
@@ -607,15 +609,15 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
         return
 
     sync_srv = None
-    if auto_sync:
-        try:
-            sync_srv = await asyncio.start_server(handle_sync_client, "0.0.0.0", sync_port, backlog=1024)
-            log.info(f"[IR] Sync listening on {sync_port} (AutoSync)")
-        except Exception as e:
-            log.error(f"[IR] Failed to bind sync port {sync_port}: {e}")
-            bridge_srv.close()
-            return
-    else:
+    try:
+        sync_srv = await asyncio.start_server(handle_sync_client, "0.0.0.0", sync_port, backlog=1024)
+        log.info(f"[IR] Sync listening on {sync_port} (AutoSync={auto_sync})")
+    except Exception as e:
+        log.error(f"[IR] Failed to bind sync port {sync_port}: {e}")
+        bridge_srv.close()
+        return
+
+    if not auto_sync:
         ports = []
         if manual_ports_csv.strip():
             for part in manual_ports_csv.split(","):
@@ -630,7 +632,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                     pass
         for p in ports:
             await open_port(p)
-        log.info("[IR] Manual ports opened.")
+        log.info(f"[IR] Manual ports opened: {ports}")
 
     log.info(f"[IR] Running (AsyncIO Engine) | bridge={bridge_port} sync={sync_port} pool={pool_size} autoSync={auto_sync}")
     await stop_event.wait()
