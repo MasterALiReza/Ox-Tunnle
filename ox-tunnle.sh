@@ -267,15 +267,15 @@ _is_running() {
 
 _stop_slot() {
   local prof="$1"
-  _is_running "$prof" || { return 0; }
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     systemctl stop "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
     systemctl disable "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
-  else
-    pkill -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
-    sleep 0.5
-    pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
+    systemctl reset-failed "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
   fi
+  pkill -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
+  pkill -f "${CONF}/${prof}.env" >/dev/null 2>&1 || true
+  sleep 0.3
+  pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
 }
 
 _run_slot() {
@@ -284,11 +284,13 @@ _run_slot() {
   _load_profile "$f"
   local log_file="${LOG_DIR}/${prof}.log"
   mkdir -p "$LOG_DIR"
-  _stop_slot "$prof" >/dev/null 2>&1 || true; sleep 0.2
+  _stop_slot "$prof" >/dev/null 2>&1 || true; sleep 0.3
 
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     _install_systemd_service
-    systemctl enable --now "ox-tunnle@${prof}.service" >/dev/null 2>&1
+    systemctl reset-failed "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
+    systemctl enable --now "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
+    systemctl restart "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
   else
     # Non-systemd fallback using background invocation
     (
@@ -303,7 +305,11 @@ _run_slot() {
 }
 
 _restart_slot() {
-  _stop_slot "$1"; sleep 0.3; _run_slot "$1"
+  local prof="$1"
+  _msg_info "Restarting $prof..."
+  _stop_slot "$prof"
+  sleep 0.5
+  _run_slot "$prof"
 }
 
 _get_slot_details() {
@@ -391,10 +397,8 @@ _delete_slot() {
     _msg_info "Cancelled."
     return 0
   fi
-  if _is_running "$prof"; then
-    _msg_info "Stopping tunnel first..."
-    _stop_slot "$prof"
-  fi
+  _msg_info "Stopping tunnel first..."
+  _stop_slot "$prof"
   rm -f "$f" "${LOG_DIR}/${prof}.log"
   _msg_ok "Deleted: $prof"
 }
