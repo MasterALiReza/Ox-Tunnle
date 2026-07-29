@@ -132,17 +132,21 @@ def is_socket_alive_async(writer: asyncio.StreamWriter, reader: asyncio.StreamRe
         return False
     try:
         sock = writer.get_extra_info("socket")
-        if sock:
-            try:
-                data = sock.recv(1, socket.MSG_PEEK)
-                if data == b"":
-                    return False
-            except BlockingIOError:
-                return True
-            except Exception:
+        if sock is None:
+            return True
+        try:
+            sock.setblocking(False)
+            data = sock.recv(1, socket.MSG_PEEK)
+            if data == b"":
                 return False
+            return True
+        except (BlockingIOError, OSError) as e:
+            if getattr(e, 'errno', None) in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return True
+            # Any other socket error means dead
+            return False
     except Exception:
-        return False
+        return True
     return True
 
 
