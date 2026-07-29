@@ -218,6 +218,18 @@ _read_port() {
   done
 }
 
+_generate_token() {
+  local tok=""
+  if command -v openssl >/dev/null 2>&1; then
+    tok="$(openssl rand -hex 16 2>/dev/null)"
+  elif [[ -r /proc/sys/kernel/random/uuid ]]; then
+    tok="$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-32)"
+  else
+    tok="$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 32 || printf "%032x" "$RANDOM$RANDOM")"
+  fi
+  echo "${tok:0:32}"
+}
+
 # ── Session management (Systemd integrated, replacing screen) ────────
 _session_name() { echo "ox_tunnle_$1"; }
 
@@ -350,7 +362,7 @@ _status_slot() {
     echo -e "  ${CYN}AutoSync${R}: ${AUTO_SYNC:-true}${PORTS:+   Ports: $PORTS}"
   fi
   if [[ -n "$SECRET" ]]; then
-    echo -e "  ${CYN}Auth Token${R}: ${GRN}Enabled (${SECRET:0:8}...)${R}"
+    echo -e "  ${CYN}Auth Token${R}: ${GRN}Enabled${R} (${B}${SECRET}${R})"
   fi
   echo -e "  ${CYN}Status${R}  : ${st_c}${B}${st_i} ${st_t}${R}"
   echo ""
@@ -372,17 +384,38 @@ _edit_profile() {
     LABEL="$(echo "$label_raw" | tr -d '"'\''\\' | cut -c1-30)"
   fi
 
-  local sec_raw=""
-  read -r -p "  Security Secret Token (optional, Enter to keep '${SECRET:-none}', 'auto' for random hex token): " sec_raw < /dev/tty || true
-  if [[ "${sec_raw,,}" == "auto" ]]; then
-    SECRET="$(head -c 16 /dev/urandom | md5sum <<< "$RANDOM-$(date)" | awk '{print $1}' 2>/dev/null || printf "%032x" "${RANDOM}")"
-  elif [[ -n "$sec_raw" ]]; then
-    if [[ "${sec_raw,,}" == "none" || "${sec_raw,,}" == "clear" ]]; then
-      SECRET=""
-    else
-      SECRET="$(echo "$sec_raw" | tr -d '"'\''\\' | cut -c1-64)"
-    fi
+  local sec_raw="" default_tok="${SECRET}"
+  if [[ -z "$default_tok" ]]; then
+    default_tok="$(_generate_token)"
   fi
+  
+  echo ""
+  echo -e "  ${CYN}${B}── Security Token Configuration ───────────────────────${R}"
+  if [[ -n "$SECRET" ]]; then
+    echo -e "  ${DIM}Current Token:${R} ${GRN}${SECRET}${R}"
+    read -r -p "  Enter new token [Press Enter to keep current, 'auto' for new, 'none' to disable]: " sec_raw < /dev/tty || true
+  else
+    echo -e "  ${DIM}Auto-Generated Token:${R} ${GRN}${default_tok}${R}"
+    read -r -p "  Enter custom token [Press Enter to accept auto-generated, 'none' to disable]: " sec_raw < /dev/tty || true
+  fi
+
+  if [[ -z "$sec_raw" ]]; then
+    SECRET="$default_tok"
+  elif [[ "${sec_raw,,}" == "auto" || "${sec_raw,,}" == "gen" || "${sec_raw,,}" == "random" ]]; then
+    SECRET="$(_generate_token)"
+  elif [[ "${sec_raw,,}" == "none" || "${sec_raw,,}" == "clear" || "${sec_raw,,}" == "off" || "${sec_raw,,}" == "disable" || "${sec_raw,,}" == "no" || "${sec_raw,,}" == "n" ]]; then
+    SECRET=""
+  else
+    SECRET="$(echo "$sec_raw" | tr -d '"'\''\\' | cut -c1-64)"
+  fi
+
+  if [[ -n "$SECRET" ]]; then
+    echo -e "  ${GRN}✔ Auth Token Active:${R} ${B}${CYN}${SECRET}${R}"
+  else
+    echo -e "  ${YEL}⚠ Auth Token Disabled${R} (Not recommended for public servers)"
+  fi
+  echo -e "  ${CYN}───────────────────────────────────────────────────────${R}"
+  echo ""
 
   if [[ "$role" == "eu" ]]; then
     IRAN_IP="$(_read_ip    "Iran server IP")"
@@ -432,6 +465,7 @@ EOF
     fi
   fi
   _msg_ok "Saved: $f"
+  _status_slot "$prof"
 }
 
 _rename_label() {
