@@ -368,6 +368,21 @@ _status_slot() {
   echo ""
 }
 
+_show_config() {
+  local prof="$1" f="$CONF/${prof}.env"
+  [[ -f "$f" ]] || { _msg_warn "Profile not found: $prof"; return 1; }
+  echo ""
+  echo -e "  ${CYN}${B}📋 Profile Configuration (${prof}.env):${R}"
+  _hr
+  while IFS='=' read -r key val || [[ -n "$key" ]]; do
+    [[ -z "$key" || "$key" =~ ^# ]] && continue
+    val="${val//\"/}"
+    echo -e "  ${CYN}${key}${R} = ${GRN}${val}${R}"
+  done < "$f"
+  _hr
+  echo ""
+}
+
 # ── Edit / create profile ─────────────────────────────────────
 _edit_profile() {
   local prof="$1" role="${1%%[0-9]*}" f="$CONF/${prof}.env"
@@ -888,8 +903,8 @@ _manage_slot_menu() {
       1) echo ""; _run_slot "$prof"; pause ;;
       2) echo ""; _stop_slot "$prof"; _msg_ok "Stopped."; pause ;;
       3) echo ""; _restart_slot "$prof"; pause ;;
-      4) _status_slot "$prof"; pause ;;
-      5) _logs_slot "$prof" ;;
+      4) _show_config "$prof"; pause ;;
+      5) _view_logs "$prof"; pause ;;
       6) _edit_profile "$prof"; pause ;;
       7) _rename_label "$prof"; pause ;;
       8) _delete_slot "$prof"; pause; return ;;  # return after delete

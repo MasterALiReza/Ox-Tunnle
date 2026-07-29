@@ -165,6 +165,7 @@ def setup_signals(stop_event: asyncio.Event, loop: asyncio.AbstractEventLoop):
 
 async def authenticate_client_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, secret: str) -> bool:
     """Client side (EU): perform mutual HMAC-SHA256 Challenge-Response handshake on Bridge/Sync channels."""
+    secret = (secret or "").strip()
     try:
         if not secret:
             writer.write(b"\x00")
@@ -190,12 +191,13 @@ async def authenticate_client_async(reader: asyncio.StreamReader, writer: asynci
         return True
     except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
         return False
-    except Exception as e:
+    except Exception:
         return False
 
 
 async def authenticate_server_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, expected_secret: str) -> bool:
     """Server side (IR): verify incoming connection with strict 3-second timeout against DoS & Scanners."""
+    expected_secret = (expected_secret or "").strip()
     try:
         async def _handshake():
             flag = await reader.readexactly(1)
@@ -205,9 +207,11 @@ async def authenticate_server_async(reader: asyncio.StreamReader, writer: asynci
                 if flag in (b"\x01", b"\x02"):
                     try:
                         if flag == b"\x01": await reader.readexactly(32)
-                        elif flag == b"\x02": await reader.readexactly(16)
+                        elif flag == b"\x02":
+                            await reader.readexactly(16)
+                            writer.write(b"\x00" * 48)
+                            await writer.drain()
                     except Exception: pass
-                    return True
                 return False
 
             if flag == b"\x00":
