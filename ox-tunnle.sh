@@ -104,7 +104,8 @@ _load_profile() {
 _install_systemd_service() {
   if ! command -v systemctl >/dev/null 2>&1; then return 0; fi
   local unit_file="/etc/systemd/system/ox-tunnle@.service"
-  if [[ ! -f "$unit_file" ]]; then
+  # Always rewrite/ensure unit file contains OXTUNNEL_LOG
+  if [[ ! -f "$unit_file" ]] || ! grep -q "OXTUNNEL_LOG" "$unit_file"; then
     cat > "$unit_file" <<EOF
 [Unit]
 Description=Ox Tunnle Service (%I)
@@ -114,6 +115,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=${CONF}/%i.env
+Environment="OXTUNNEL_LOG=${LOG_DIR}/%i.log"
+Environment="OXTUNNEL_PROFILE=%i"
 Environment="ULIMIT_NOFILE=1048576"
 LimitNOFILE=1048576
 LimitNPROC=1048576
@@ -324,6 +327,28 @@ _view_logs() {
   local prof="$1" log_file="${LOG_DIR}/${prof}.log"
   echo ""
   if [[ ! -f "$log_file" ]] || [[ ! -s "$log_file" ]]; then
+    if command -v journalctl >/dev/null 2>&1 && systemctl is-active --quiet "ox-tunnle@${prof}.service" 2>/dev/null; then
+      _msg_info "Live log (via journalctl): ${B}$prof${R}  ${DIM}(Ctrl+C exits this view — tunnel stays running)${R}"
+      _hr; echo ""
+      trap ':' INT
+      if [[ -t 1 ]]; then
+        journalctl -u "ox-tunnle@${prof}.service" -n 80 -f 2>/dev/null | sed -u \
+          -e "s/\[ERROR\]/\x1b[1;31m[ERROR]\x1b[0m/g" \
+          -e "s/\[WARNING\]/\x1b[1;33m[WARNING]\x1b[0m/g" \
+          -e "s/\[INFO\]/\x1b[1;32m[INFO]\x1b[0m/g" \
+          -e "s/\[SECURITY\]/\x1b[1;35m[SECURITY]\x1b[0m/g" \
+          -e "s/\[SYNC\]/\x1b[1;36m[SYNC]\x1b[0m/g" \
+          -e "s/\[IR-SYNC\]/\x1b[1;36m[IR-SYNC]\x1b[0m/g" \
+          -e "s/\[IR-BRIDGE\]/\x1b[1;34m[IR-BRIDGE]\x1b[0m/g" \
+          -e "s/\[IR-TRAFFIC\]/\x1b[1;31m[IR-TRAFFIC]\x1b[0m/g" \
+          -e "s/\[EU-WORKER\]/\x1b[1;33m[EU-WORKER]\x1b[0m/g" || true
+      else
+        journalctl -u "ox-tunnle@${prof}.service" -n 80 -f 2>/dev/null || true
+      fi
+      trap - INT
+      echo ""; _msg_info "Log view ended. Tunnel is still running."
+      return 0
+    fi
     _msg_warn "No logs for '${prof}' yet."
     _msg_info "Start the tunnel first and wait a moment."
     pause; return
@@ -479,6 +504,8 @@ IRAN_IP="${IRAN_IP}"
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 SECRET="${SECRET}"
+OXTUNNEL_LOG="${LOG_DIR}/${prof}.log"
+OXTUNNEL_PROFILE="${prof}"
 EOF
   else
     BRIDGE="$(_read_port "Bridge port" "${BRIDGE:-7000}")"
@@ -497,6 +524,8 @@ SYNC=${SYNC}
 AUTO_SYNC=true
 PORTS=
 SECRET="${SECRET}"
+OXTUNNEL_LOG="${LOG_DIR}/${prof}.log"
+OXTUNNEL_PROFILE="${prof}"
 EOF
     else
       local ports_raw; read -r -p "  Manual ports CSV (e.g. 80,443,2083): " ports_raw < /dev/tty
@@ -509,6 +538,8 @@ SYNC=${SYNC}
 AUTO_SYNC=false
 PORTS="${PORTS}"
 SECRET="${SECRET}"
+OXTUNNEL_LOG="${LOG_DIR}/${prof}.log"
+OXTUNNEL_PROFILE="${prof}"
 EOF
     fi
   fi
