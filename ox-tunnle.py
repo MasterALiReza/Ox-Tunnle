@@ -482,14 +482,13 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             total = idle_workers + active_workers
             if idle_workers < desired_idle and total < max_workers:
                 to_spawn = min(desired_idle - idle_workers, max_workers - total)
-                batch_size = 25 if idle_workers < 20 else 10
-                batch = min(to_spawn, batch_size)
+                batch = min(to_spawn, 5)
                 for _ in range(batch):
                     task = asyncio.create_task(reverse_link_worker())
                     worker_tasks.add(task)
                     task.add_done_callback(worker_tasks.discard)
             
-            await asyncio.sleep(0.05 if idle_workers < 10 else 0.2)
+            await asyncio.sleep(0.05 if idle_workers < 20 else 0.1)
 
     sync_task = asyncio.create_task(port_sync_loop())
     manager_task = asyncio.create_task(pool_manager())
