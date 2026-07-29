@@ -50,9 +50,11 @@ fetch_url_to() {
   local target_path="$1" out="$2"
   local filename="${target_path##*/}"
   local urls=(
+    "https://ghproxy.net/https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+    "https://mirror.ghproxy.com/https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
     "https://cdn.jsdelivr.net/gh/MasterALiReza/Ox-Tunnle@main/${filename}"
-    "https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
     "https://raw.githack.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+    "https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
   )
   for url in "${urls[@]}"; do
     if have curl; then

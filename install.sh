@@ -61,9 +61,11 @@ trap 'rm -rf "$TMP"' EXIT
 download_file() {
   local filename="$1" dst="$2"
   local urls=(
-    "https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+    "https://ghproxy.net/https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+    "https://mirror.ghproxy.com/https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
     "https://cdn.jsdelivr.net/gh/MasterALiReza/Ox-Tunnle@main/${filename}"
     "https://raw.githack.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+    "https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
   )
   for url in "${urls[@]}"; do
     # Try normal curl, then insecure (-k) fallback if SSL cert is outdated on Iran VPS
