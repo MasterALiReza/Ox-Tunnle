@@ -405,7 +405,9 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
         
         idle_workers += 1
         try:
-            reader, writer = await asyncio.open_connection(iran_ip, bridge_port)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(iran_ip, bridge_port), timeout=10.0
+            )
             global_conn_error = False
             tune_writer(writer)
             
@@ -466,7 +468,7 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             total = idle_workers + active_workers
             if idle_workers < desired_idle and total < max_workers:
                 to_spawn = min(desired_idle - idle_workers, max_workers - total)
-                batch = min(to_spawn, 50)
+                batch = min(to_spawn, 10)
                 for _ in range(batch):
                     task = asyncio.create_task(reverse_link_worker())
                     worker_tasks.add(task)
