@@ -448,9 +448,20 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 )
             except Exception as e:
                 log.warning(f"[EU-WORKER] Local target port {target_port} unreachable on EU server (127.0.0.1:{target_port}): {e}")
+                try:
+                    writer.write(b"\x01")
+                    await asyncio.wait_for(writer.drain(), timeout=2.0)
+                except Exception:
+                    pass
                 writer.close()
                 return
 
+            try:
+                writer.write(b"\x00")
+                await asyncio.wait_for(writer.drain(), timeout=2.0)
+            except Exception:
+                pass
+                
             tune_writer(local_writer)
             await bridge_async(reader, writer, local_reader, local_writer)
         except Exception:
@@ -505,7 +516,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
     stop_event = asyncio.Event()
     setup_signals(stop_event, loop)
 
-    pool = asyncio.Queue(maxsize=pool_size * 2)
+    pool = asyncio.LifoQueue(maxsize=pool_size * 2)
     active_servers: Dict[int, Any] = {}
     sync_sem = asyncio.Semaphore(MAX_SYNC_CONNS)
 
@@ -556,8 +567,18 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
         try:
             eu_writer.write(struct.pack("!H", target_port))
             await asyncio.wait_for(eu_writer.drain(), timeout=5.0)
+            
+            status = await asyncio.wait_for(eu_reader.readexactly(1), timeout=5.0)
+            if status != b"\x00":
+                log.warning(f"[IR-TRAFFIC] EU worker rejected connection for port {target_port} (Local service not running on EU).")
+                try: user_writer.close()
+                except Exception: pass
+                try: eu_writer.close()
+                except Exception: pass
+                return
+                
         except Exception as e:
-            log.warning(f"[IR-TRAFFIC] Failed sending target port {target_port} header to EU worker: {e}")
+            log.warning(f"[IR-TRAFFIC] Failed sending target port {target_port} header to EU worker (or timeout): {e}")
             try: user_writer.close()
             except Exception: pass
             try: eu_writer.close()
