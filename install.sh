@@ -34,24 +34,25 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   err "Please run as root: sudo bash install.sh"
 fi
 
-# ── apt-get update (non-fatal) ────────────────────────────────
-info "Updating package lists..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y > /dev/null 2>&1 || warn "apt-get update returned non-zero (continuing anyway)"
-
-# ── Core deps ─────────────────────────────────────────────────
-CORE_DEPS=(curl ca-certificates python3 screen iproute2)
-
-info "Installing core dependencies..."
+# ── Core deps check ───────────────────────────────────────────
+CORE_DEPS=(curl ca-certificates python3 iproute2)
+MISSING_DEPS=()
 for dep in "${CORE_DEPS[@]}"; do
-  if dpkg -s "$dep" > /dev/null 2>&1; then
-    echo -e "    ${GRN}✔${R}  $dep (already installed)"
-  else
-    echo -e "    ${YLW}↓${R}  Installing $dep ..."
-    apt-get install -y "$dep" > /dev/null 2>&1 \
-      || warn "Could not install $dep — may still work"
+  if ! dpkg -s "$dep" > /dev/null 2>&1; then
+    MISSING_DEPS+=("$dep")
   fi
 done
+
+if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
+  info "Installing missing dependencies: ${MISSING_DEPS[*]} ..."
+  export DEBIAN_FRONTEND=noninteractive
+  timeout 10 apt-get update -y > /dev/null 2>&1 || warn "apt-get update skipped/timed out"
+  for dep in "${MISSING_DEPS[@]}"; do
+    timeout 20 apt-get install -y "$dep" > /dev/null 2>&1 || warn "Could not install $dep"
+  done
+else
+  ok "Core dependencies (curl, python3, iproute2) already installed."
+fi
 
 # ── Download files ────────────────────────────────────────────
 TMP="$(mktemp -d)"
@@ -65,7 +66,9 @@ download_file() {
     "https://raw.githack.com/MasterALiReza/Ox-Tunnle/main/${filename}"
   )
   for url in "${urls[@]}"; do
-    if curl -fsSL --connect-timeout 6 --retry 2 "$url" -o "$dst" 2>/dev/null; then
+    # Try normal curl, then insecure (-k) fallback if SSL cert is outdated on Iran VPS
+    if curl -fsSL --connect-timeout 5 --retry 2 "$url" -o "$dst" 2>/dev/null \
+       || curl -fsSLk --connect-timeout 5 --retry 2 "$url" -o "$dst" 2>/dev/null; then
       if [[ -s "$dst" ]]; then
         return 0
       fi
