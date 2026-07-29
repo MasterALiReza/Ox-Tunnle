@@ -278,7 +278,9 @@ async def bridge_async(reader_a: asyncio.StreamReader, writer_a: asyncio.StreamW
     """Bridge two asynchronous TCP streams concurrently."""
     t1 = asyncio.create_task(pipe_async(reader_a, writer_b))
     t2 = asyncio.create_task(pipe_async(reader_b, writer_a))
-    await asyncio.gather(t1, t2, return_exceptions=True)
+    done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+    for t in pending:
+        t.cancel()
     for w in (writer_a, writer_b):
         try:
             if not w.is_closing():
@@ -396,9 +398,18 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 hdr = await reader.readexactly(2)
                 (target_port,) = struct.unpack("!H", hdr)
 
-                local_reader, local_writer = await asyncio.open_connection("127.0.0.1", target_port)
-                tune_writer(local_writer)
+                try:
+                    local_reader, local_writer = await asyncio.wait_for(
+                        asyncio.open_connection("127.0.0.1", target_port), timeout=5.0
+                    )
+                except Exception:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                    continue
 
+                tune_writer(local_writer)
                 await bridge_async(reader, writer, local_reader, local_writer)
                 delay = 0.2
             except asyncio.IncompleteReadError:
@@ -451,8 +462,11 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
     async def handle_bridge_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         tune_writer(writer)
         if await authenticate_server_async(reader, writer, secret):
+            if pool.full():
+                writer.close()
+                return
             try:
-                await pool.put((reader, writer))
+                pool.put_nowait((reader, writer))
             except Exception:
                 writer.close()
         else:
@@ -485,7 +499,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
         eu_reader, eu_writer = europe
         try:
             eu_writer.write(struct.pack("!H", target_port))
-            await eu_writer.drain()
+            await asyncio.wait_for(eu_writer.drain(), timeout=5.0)
         except Exception:
             try: user_writer.close()
             except Exception: pass
