@@ -104,8 +104,8 @@ _load_profile() {
 _install_systemd_service() {
   if ! command -v systemctl >/dev/null 2>&1; then return 0; fi
   local unit_file="/etc/systemd/system/ox-tunnle@.service"
-  # Always rewrite/ensure unit file contains OXTUNNEL_LOG
-  if [[ ! -f "$unit_file" ]] || ! grep -q "OXTUNNEL_LOG" "$unit_file"; then
+  # Always rewrite/ensure unit file contains TimeoutStopSec
+  if [[ ! -f "$unit_file" ]] || ! grep -q "TimeoutStopSec" "$unit_file"; then
     cat > "$unit_file" <<EOF
 [Unit]
 Description=Ox Tunnle Service (%I)
@@ -124,6 +124,7 @@ ExecStart=/usr/bin/env python3 "${PY}"
 Restart=always
 RestartSec=3s
 KillMode=mixed
+TimeoutStopSec=5s
 StandardOutput=journal
 StandardError=journal
 
@@ -268,14 +269,21 @@ _is_running() {
 _stop_slot() {
   local prof="$1"
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
-    systemctl stop "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
+    # Stop in background to prevent hanging on older systemd units missing TimeoutStopSec
+    systemctl stop "ox-tunnle@${prof}.service" >/dev/null 2>&1 &
+    local stop_pid=$!
+    sleep 0.5
+    # Aggressively kill the process to release systemctl stop immediately
+    pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
+    wait $stop_pid 2>/dev/null || true
     systemctl disable "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
     systemctl reset-failed "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
+  else
+    pkill -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
+    pkill -f "${CONF}/${prof}.env" >/dev/null 2>&1 || true
+    sleep 0.3
+    pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
   fi
-  pkill -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
-  pkill -f "${CONF}/${prof}.env" >/dev/null 2>&1 || true
-  sleep 0.3
-  pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
 }
 
 _run_slot() {
@@ -285,6 +293,18 @@ _run_slot() {
   local log_file="${LOG_DIR}/${prof}.log"
   mkdir -p "$LOG_DIR"
   _stop_slot "$prof" >/dev/null 2>&1 || true; sleep 0.3
+
+  # Pre-flight port check to warn users
+  if have ss; then
+    local check_ports=()
+    [[ -n "${BRIDGE:-}" ]] && check_ports+=("$BRIDGE")
+    [[ -n "${SYNC:-}" ]] && check_ports+=("$SYNC")
+    for p in "${check_ports[@]}"; do
+      if ss -tlnp 2>/dev/null | grep -q ":${p} "; then
+        _msg_warn "Port ${p} is in use by another process. The tunnel might loop/fail."
+      fi
+    done
+  fi
 
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     _install_systemd_service

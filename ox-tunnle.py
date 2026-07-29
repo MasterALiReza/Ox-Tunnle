@@ -356,6 +356,14 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
     stop_event = asyncio.Event()
     setup_signals(stop_event, loop)
 
+    worker_tasks = set()
+    idle_workers = 0
+    active_workers = 0
+    desired_idle = pool_size
+    max_workers = pool_size * 5
+    last_conn_err_time = 0
+    global_conn_error = False
+
     async def port_sync_loop():
         last_log_time = 0
         while not stop_event.is_set():
@@ -393,68 +401,90 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 await asyncio.sleep(SYNC_INTERVAL)
 
     async def reverse_link_worker():
-        delay = 0.2
-        last_log_time = 0
-        while not stop_event.is_set():
-            try:
-                reader, writer = await asyncio.open_connection(iran_ip, bridge_port)
-                tune_writer(writer)
-                if not await authenticate_client_async(reader, writer, secret):
-                    now = time.time()
-                    if now - last_log_time > 15:
-                        log.warning(f"[EU-WORKER] Auth FAILED on bridge {iran_ip}:{bridge_port}")
-                        last_log_time = now
-                    writer.close()
-                    await asyncio.sleep(2.0)
-                    continue
-
-                hdr = await reader.readexactly(2)
-                (target_port,) = struct.unpack("!H", hdr)
-
-                try:
-                    local_reader, local_writer = await asyncio.wait_for(
-                        asyncio.open_connection("127.0.0.1", target_port), timeout=5.0
-                    )
-                except Exception as e:
-                    log.warning(f"[EU-WORKER] Local target port {target_port} unreachable on EU server (127.0.0.1:{target_port}): {e}")
-                    try:
-                        writer.close()
-                    except Exception:
-                        pass
-                    continue
-
-                tune_writer(local_writer)
-                await bridge_async(reader, writer, local_reader, local_writer)
-                delay = 0.2
-            except asyncio.IncompleteReadError:
-                await asyncio.sleep(0.1)
-            except Exception as e:
+        nonlocal idle_workers, active_workers, last_conn_err_time, global_conn_error
+        
+        idle_workers += 1
+        try:
+            reader, writer = await asyncio.open_connection(iran_ip, bridge_port)
+            global_conn_error = False
+            tune_writer(writer)
+            
+            if not await authenticate_client_async(reader, writer, secret):
                 now = time.time()
-                if now - last_log_time > 15:
-                    log.warning(f"[EU-WORKER] Connection error to Iran bridge {iran_ip}:{bridge_port} -> {e}")
-                    last_log_time = now
-                if not stop_event.is_set():
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, 5.0)
+                if now - last_conn_err_time > 15:
+                    log.warning(f"[EU-WORKER] Auth FAILED on bridge {iran_ip}:{bridge_port}")
+                    last_conn_err_time = now
+                writer.close()
+                idle_workers -= 1
+                global_conn_error = True
+                return
+
+            # Wait for target port from IR server
+            hdr = await reader.readexactly(2)
+            
+        except asyncio.IncompleteReadError:
+            idle_workers -= 1
+            return
+        except Exception as e:
+            global_conn_error = True
+            now = time.time()
+            if now - last_conn_err_time > 15:
+                log.warning(f"[EU-WORKER] Connection error to Iran bridge {iran_ip}:{bridge_port} -> {e}")
+                last_conn_err_time = now
+            idle_workers -= 1
+            return
+
+        # Bridge active
+        idle_workers -= 1
+        active_workers += 1
+        
+        try:
+            (target_port,) = struct.unpack("!H", hdr)
+            try:
+                local_reader, local_writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", target_port), timeout=5.0
+                )
+            except Exception as e:
+                log.warning(f"[EU-WORKER] Local target port {target_port} unreachable on EU server (127.0.0.1:{target_port}): {e}")
+                writer.close()
+                return
+
+            tune_writer(local_writer)
+            await bridge_async(reader, writer, local_reader, local_writer)
+        except Exception:
+            pass
+        finally:
+            active_workers -= 1
+            try: writer.close()
+            except Exception: pass
+
+    async def pool_manager():
+        while not stop_event.is_set():
+            if global_conn_error:
+                await asyncio.sleep(2.0)
+                
+            total = idle_workers + active_workers
+            if idle_workers < desired_idle and total < max_workers:
+                to_spawn = min(desired_idle - idle_workers, max_workers - total)
+                batch = min(to_spawn, 50)
+                for _ in range(batch):
+                    task = asyncio.create_task(reverse_link_worker())
+                    worker_tasks.add(task)
+                    task.add_done_callback(worker_tasks.discard)
+            
+            await asyncio.sleep(0.1)
 
     sync_task = asyncio.create_task(port_sync_loop())
-    worker_tasks = []
-    _stagger = min(2.0, pool_size * 0.005)
-    for i in range(pool_size):
-        task = asyncio.create_task(reverse_link_worker())
-        worker_tasks.append(task)
-        if _stagger > 0 and i < pool_size - 1:
-            await asyncio.sleep(_stagger / pool_size)
-            if stop_event.is_set():
-                break
+    manager_task = asyncio.create_task(pool_manager())
 
-    log.info(f"[EU] Running (AsyncIO Engine) | IRAN={iran_ip} bridge={bridge_port} sync={sync_port} pool={pool_size}")
+    log.info(f"[EU] Running (AsyncIO Engine) | IRAN={iran_ip} bridge={bridge_port} sync={sync_port} pool={pool_size} (Max {max_workers})")
     await stop_event.wait()
     log.info("[EU] Stopping tasks gracefully...")
     sync_task.cancel()
-    for t in worker_tasks:
+    manager_task.cancel()
+    for t in list(worker_tasks):
         t.cancel()
-    await asyncio.gather(sync_task, *worker_tasks, return_exceptions=True)
+    await asyncio.gather(sync_task, manager_task, *worker_tasks, return_exceptions=True)
     log.info("[EU] Stopped.")
 
 
