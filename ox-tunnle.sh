@@ -47,9 +47,27 @@ apt_try_install() {
 }
 
 fetch_url_to() {
-  local url="$1" out="$2"
-  if have curl; then curl -fsSL "$url" -o "$out"
-  else have wget || apt_try_install wget; wget -qO "$out" "$url"; fi
+  local target_path="$1" out="$2"
+  local filename="${target_path##*/}"
+  local urls=(
+    "https://cdn.jsdelivr.net/gh/MasterALiReza/Ox-Tunnle@main/${filename}"
+    "https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+    "https://raw.githack.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+  )
+  for url in "${urls[@]}"; do
+    if have curl; then
+      if curl -fsSL --connect-timeout 5 --retry 2 "$url" -o "$out" 2>/dev/null \
+         || curl -fsSLk --connect-timeout 5 --retry 2 "$url" -o "$out" 2>/dev/null; then
+        [[ -s "$out" ]] && return 0
+      fi
+    elif have wget; then
+      if wget -qO "$out" --timeout=5 "$url" 2>/dev/null \
+         || wget --no-check-certificate -qO "$out" --timeout=5 "$url" 2>/dev/null; then
+        [[ -s "$out" ]] && return 0
+      fi
+    fi
+  done
+  return 1
 }
 
 is_installed() { [[ -x "$INSTALL_PATH" ]]; }
