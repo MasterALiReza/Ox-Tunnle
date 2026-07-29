@@ -2,64 +2,62 @@
 
 # 🐂 Ox Tunnle
 
-High-Performance Reverse TCP Tunnel Manager  
-Multi-Slot • AutoSync • Health Check • BBR Optimization • Live Logs
+High-Performance Asynchronous Reverse TCP Tunnel Manager  
+Multi-Slot • AutoSync • HMAC Security • Systemd Ready • BBR & AsyncIO Powered
 
 **Telegram:** [t.me/WexortYT](https://t.me/WexortYT)
-
 
 ---
 
 <p align="center">
-  <b>Lightweight • Stable • Production Ready</b>
+  <b>Lightweight • Secure • Production Ready</b>
 </p>
 
 ---
 
 # 📌 Overview
 
-Ox Tunnle is a reverse TCP tunneling system designed to connect two servers:
+Ox Tunnle is a state-of-the-art reverse TCP tunneling system designed to reliably bridge two servers:
 
-- 🇮🇷 IR (Iran Server)
-- 🌍 EU (Outside Server)
+- 🇮🇷 IR (Iran Server / Bridge Ingress)
+- 🌍 EU (Outside Server / Target Gateway)
 
-It supports multi-slot configuration, automatic port synchronization, system optimization, and multiple port-forwarding methods.
+Built on an ultra-fast **AsyncIO** core engine (with optional `uvloop` acceleration), it eliminates CPU thread overhead and reduces memory usage to under 50MB even under high concurrent loads. It features integrated **HMAC-SHA256 Challenge-Response** authentication to defend against scanners, replay attacks, and unauthorized connections.
 
 ---
 
 # 🧠 Architecture
 
 ```
-Client → IR Server ⇄ EU Server
-             │
-        Bridge Port (Main Tunnel)
-             │
-         Sync Port (AutoSync)
+Client → IR Server (0.0.0.0:Port) ⇄ [HMAC-Protected Tunnel] ⇄ EU Server → Local Target (127.0.0.1:Port)
+                                  │
+                          Bridge Port (Main TCP Stream)
+                                  │
+                           Sync Port (AutoSync API)
 ```
 
 ### 🔹 Bridge Port
-Main persistent TCP tunnel connection between IR and EU.
+Main persistent TCP tunnel connection between IR and EU. Protected by challenge-response HMAC authentication.
 
 ### 🔹 Sync Port
-Used for automatic port synchronization between servers.
+Low-latency channel used for real-time automatic port listening synchronization from EU to IR.
 
 ---
 
 # 🛠 Features
 
 | Feature | Description |
-|----------|------------|
-| Reverse TCP Tunnel | Persistent IR ⇄ EU connection |
-| Multi-Slot (1–10) | Store up to 10 independent tunnel configs |
-| AutoSync | Automatic port creation & synchronization |
-| Cron Health Check | Automatic restart if tunnel stops |
-| BBR Optimization | Network performance tuning |
-| Multi Port Forward | iptables, nftables, HAProxy, socat |
-| systemd Integration | Auto-start on reboot |
-| Performance Tuning | ENV-based tuning |
-| Thread Control | Worker pool limitation |
-| Graceful Shutdown | Clean SIGTERM/SIGINT handling |
-| File-Based Logging | Live log via `tail -f` — safe, no crash on exit |
+| :--- | :--- |
+| **AsyncIO Engine** | Event-driven high-speed engine with near-zero thread overhead & `uvloop` acceleration |
+| **HMAC-SHA256 Security** | Challenge-response protocol preventing replay attacks, probes, and unauthorized access |
+| **Reverse TCP Tunnel** | Persistent bi-directional data stream between IR ⇄ EU |
+| **Multi-Slot (1–10)** | Maintain up to 10 isolated tunnel profiles (`eu1`, `ir1`, etc.) |
+| **AutoSync** | Automatically detects open listening ports on EU and mirrors them on IR |
+| **Native Systemd Integration** | Runs as dedicated Linux service instances (`ox-tunnle@<profile>.service`) with auto-reboot recovery |
+| **Cron Health Check** | Automated watchdog ensuring continuous operation and auto-restart |
+| **BBR Optimization** | Linux kernel TCP congestion control & sysctl performance tuning |
+| **Graceful Shutdown** | Safe termination on SIGTERM/SIGINT with port and socket pruning |
+| **Live Logging** | Standard system journal logs (`journalctl`) and safe file-based logs |
 
 ---
 
@@ -73,274 +71,142 @@ Used for automatic port synchronization between servers.
 bash <(curl -Ls https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/install.sh)
 ```
 
-After installation, open the Tunnel Manager:
+After installation, launch the Tunnel Manager:
 
 ```bash
 sudo ox-tunnle
 ```
 
-### 1️⃣ Install Dependencies
+### 1️⃣ Complete Setup & Dependencies
 
-Select:
-
+Select from menu:
 ```
 5) Install / Complete Setup
 ```
+This automatically installs required dependencies and registers the native systemd template service.
 
 ---
 
-### 2️⃣ Create Tunnel
+### 2️⃣ Create Tunnel Profile
 
 ```
 1) Create/Update profile
 2) IRAN Server
 ```
 
----
-
-### 3️⃣ Select Slot (1–10)
-
-Each slot represents a saved configuration.
-
----
-
-### 4️⃣ Enter Bridge Port
-
-Default:
-
-```
-7000
-```
-
-Must match on both servers.
-
----
-
-### 5️⃣ Enter Sync Port
-
-Default:
-
-```
-7001
-```
-
-Must match on both servers. Must be **different** from Bridge Port.
-
----
-
-### 6️⃣ Enable AutoSync?
-
-```
-y  → Enable
-n  → Disable
-```
-
----
-
-### 7️⃣ Enter Config Port
-
-Enter your desired service port.
-
-Press Enter to finish.
+- **Select Slot (1–10):** Choose an identifier (e.g., Slot 1 corresponds to `ir1`).
+- **Enter Bridge Port:** Default is `7000` (must match on both servers).
+- **Enter Sync Port:** Default is `7001` (must match on both servers and be distinct from Bridge Port).
+- **AutoSync Mode:** Enable (`y`) to automatically detect and open ports, or disable (`n`) to manually provide a comma-separated list of ports.
+- **Security Token (HMAC):** Enter a strong custom secret token or press Enter to auto-generate a 32-character hex key. *Save this key to enter on the EU server!*
 
 ---
 
 # 🔵 Step 2 — Setup EU Server
 
-Repeat same process:
+Repeat the installation command on your outside (EU) server:
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/install.sh)
 ```
 
-After installation:
-
+Launch manager and setup profile:
 ```bash
 sudo ox-tunnle
 ```
-
 Select:
-
 ```
 5) Install / Complete Setup
 1) Create/Update profile
 2) EU Server
 ```
-
-- Choose same Slot
-- Enter IR Server IP
-- Enter same Bridge Port
-- Enter same Sync Port
-
-Press Enter to finish.
+- Choose the same slot number (e.g., `eu1`).
+- Enter your **IR Server IP Address**.
+- Enter the identical **Bridge Port** and **Sync Port**.
+- Enter the exact same **Security Token** generated on the IR server.
 
 ---
 
-# ▶️ Start Tunnel
+# ▶️ Service Management
 
-## On IR:
+You can control active slots directly from the interactive menu or using standard systemd commands:
 
+## Via Menu:
 ```
 2) Manage tunnel (select slot)
-→ Select IRAN
-→ Select Slot
-→ 2) Start
-→ 5) Status
+→ Select IRAN or EU
+→ Select Slot Number
+→ 2) Start / Restart
+→ 5) Status / Live Logs
 ```
 
-Status must show:
+## Via Native Systemd CLI:
+```bash
+# Start a specific slot (e.g., EU Slot 1 or IR Slot 1)
+systemctl start ox-tunnle@eu1
+systemctl start ox-tunnle@ir1
 
+# Check real-time service status
+systemctl status ox-tunnle@eu1
+
+# Stop a tunnel instance
+systemctl stop ox-tunnle@eu1
+
+# View live stream of execution logs
+journalctl -u ox-tunnle@eu1 -f
 ```
-Running
-```
-
-## On EU:
-
-Repeat same steps.
 
 ---
 
-# 🎉 Tunnel Connected Successfully
+# 🔐 Security & Architecture Hardening
+
+Ox Tunnle enforces modern security and stability practices:
+- **Challenge-Response Auth:** Unlike static hashes, every connection performs a dynamic 16-byte nonce challenge verified via HMAC-SHA256, nullifying packet replay attempts.
+- **Anti-Probing & Scanner Drop:** Unauthenticated attempts on Bridge or Sync ports are dropped immediately within 3 seconds without leaking handshake banners.
+- **Resource Protection:** Dynamic pool allocation scales with system RAM and file descriptor limits, preventing connection starvation and memory overflow.
 
 ---
 
-# ⚙ Optional Enhancements
+# ⚡ Advanced CLI & Environment Tuning
 
----
-
-## 🚀 Enable BBR Optimization
-
-```
-8) Optimize server (BBR + sysctl)
-```
-
-Enables:
-
-- BBR congestion control
-- fq queue discipline
-- sysctl performance tuning
-
----
-
-## 🕒 Enable Health Check (Cron)
-
-```
-3) Enable cron health-check
-```
-
-Choose interval in minutes.
-
-Auto-restarts tunnel if stopped.
-
----
-
-# 🔄 Port Forward Methods
-
-Available methods:
-
-1. iptables (DNAT)
-2. nftables
-3. HAProxy (Layer 4)
-4. socat relay
-
-Each method supports:
-- Add rule
-- Remove rule
-- Show rules
-
----
-
-# ⚡ Performance Tuning (Advanced)
-
-You can configure environment variables:
+The core engine (`ox-tunnle.py`) supports full command-line arguments and environment variables:
 
 ```bash
-export OXTUNNEL_POOL=128
-export AUTO_SOCKBUF=1
-export BUF_COPY_BYTES=262144
-export METRICS_PORT=9109
-```
+# Manual command-line execution
+python3 /usr/local/bin/ox-tunnle.py --role ir --bridge-port 7000 --sync-port 7001 --secret YOUR_SECRET_KEY
 
-> **Note:** The legacy `PAHLAVI_POOL` env var is still accepted for backward compatibility.
-
----
-
-# 🔐 Security Recommendations
-
-- Only open required ports
-- Use firewall rules carefully
-- Keep Bridge & Sync ports protected
-- Monitor active connections
-- Enable failover if using multiple EU servers
-
----
-
-# 🛠 Troubleshooting
-
-Check service:
-
-```bash
-systemctl status ox-tunnle
-```
-
-Check listening ports:
-
-```bash
-ss -lntp
-```
-
-Test connectivity:
-
-```bash
-nc -zv IR_IP 7000
+# Environmental performance overrides
+export OXTUNNEL_POOL=256      # Override automatic worker pool size
+export OXTUNNEL_LOG=/var/log/ox-tunnle/engine.log  # Enable rotating log file output
 ```
 
 ---
 
-# 📊 Recommended Production Setup
+# 🛠 Troubleshooting & Diagnostics
 
-- Enable BBR
-- Enable Cron HealthCheck
-- Use HAProxy for managed forwarding
-- Use AutoSync
-- Monitor logs regularly
-
----
-
-# ❓ FAQ
-
-### Q: Bridge & Sync ports must match?
-Yes, both servers must use identical values. They must also be **different from each other**.
-
-### Q: Can I run multiple tunnels?
-Yes, use different slots.
-
-### Q: What if tunnel stops?
-Enable Cron HealthCheck.
-
-### Q: Does it survive reboot?
-Yes (systemd integration).
-
-### Q: What changed from PAHLAVI_POOL to OXTUNNEL_POOL?
-Both env vars are supported. `OXTUNNEL_POOL` is the new name; `PAHLAVI_POOL` still works.
+- **Verify Active Ports:** Check if bridge and sync ports are listening on IR:
+  ```bash
+  ss -lntp | grep python3
+  ```
+- **Test EU ⇄ IR Connectivity:** Verify port reachability from EU:
+  ```bash
+  nc -zv IR_SERVER_IP 7000
+  nc -zv IR_SERVER_IP 7001
+  ```
+- **Inspect Detailed Logs:**
+  ```bash
+  journalctl -u ox-tunnle@ir1.service -n 50 --no-pager
+  ```
 
 ---
 
 # 📁 Project Structure
 
 ```
-ox-tunnle.sh   → Manager Script
-ox-tunnle.py   → Core Tunnel Engine
-install.sh     → One-line installer
+ox-tunnle.sh   → Comprehensive Shell Manager & Interface
+ox-tunnle.py   → AsyncIO Core Tunnel & HMAC Authentication Engine
+install.sh     → Automated One-Line Deployment Script
 ```
-
----
-
-# 📌 Final Notes
-
-Any configuration change must be applied identically on both servers.
-
-Restart tunnel after changes.
 
 ---
 

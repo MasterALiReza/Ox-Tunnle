@@ -64,7 +64,7 @@ _load_profile() {
   local f="$1"
   [[ -f "$f" ]] || return 1
   # Reset all expected variables first
-  ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL=""
+  ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL="" SECRET=""
   local line key val
   while IFS= read -r line || [[ -n "$line" ]]; do
     # skip blank lines and comments
@@ -81,10 +81,40 @@ _load_profile() {
   done < "$f"
 }
 
+_install_systemd_service() {
+  if ! command -v systemctl >/dev/null 2>&1; then return 0; fi
+  local unit_file="/etc/systemd/system/ox-tunnle@.service"
+  if [[ ! -f "$unit_file" ]]; then
+    cat > "$unit_file" <<EOF
+[Unit]
+Description=Ox Tunnle Service (%I)
+After=network-online.target sysctl.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=${CONF}/%i.env
+Environment="ULIMIT_NOFILE=1048576"
+LimitNOFILE=1048576
+LimitNPROC=1048576
+ExecStart=/usr/bin/env python3 "${PY}"
+Restart=always
+RestartSec=3s
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
+}
+
 ensure() {
   mkdir -p "$CONF" "$LOG_DIR" "$(dirname "$PY")"
-  have screen  || apt_try_install screen
   have python3 || apt_try_install python3
+  _install_systemd_service
   have curl    || apt_try_install curl
   have ss      || apt_try_install iproute2
   have crontab || apt_try_install cron
@@ -114,36 +144,48 @@ _menu_item() {
   printf "  ${CYN}${B}[%s]${R}  %b\n" "$1" "$2"
 }
 
-# ── Network info  (fetched ONCE at startup, cached in globals) ───────
-_get_public_ip()  { curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || true; }
-_get_ipinfo_field() {
-  local field="$1" ip="$2"
-  [[ -n "$ip" ]] || { echo ""; return; }
-  local json; json="$(curl -fsSL --max-time 4 "https://ipinfo.io/${ip}/json" 2>/dev/null || true)"
-  [[ -n "$json" ]] || { echo ""; return; }
-  echo "$json" | tr -d '\n' | sed -n "s/.*\"${field}\":[ ]*\"\([^\"]*\)\".*/\1/p" | head -n1
-}
-
-# Globals populated once by _fetch_server_info
+# ── Network info  (instant cache with async update to eliminate menu lag) ───────
 _CACHE_IP=""
 _CACHE_LOC=""
 _CACHE_DC=""
 _CACHE_READY=0
 
 _fetch_server_info() {
-  # Run in background; sets globals when done
-  _CACHE_IP="$(_get_public_ip)"
-  if [[ -n "$_CACHE_IP" ]]; then
-    local city country org
-    city="$(_get_ipinfo_field city    "$_CACHE_IP")"
-    country="$(_get_ipinfo_field country "$_CACHE_IP")"
-    org="$(_get_ipinfo_field org     "$_CACHE_IP")"
-    _CACHE_LOC="${city}${city:+, }${country}"
-    _CACHE_DC="${org}"
+  local cache_file="/tmp/.oxtunnel_server_info.cache"
+  if [[ -f "$cache_file" && -s "$cache_file" ]]; then
+    # shellcheck disable=SC1090
+    source "$cache_file" 2>/dev/null || true
+    _CACHE_IP="${_CACHE_IP:-Unknown}"
+    _CACHE_LOC="${_CACHE_LOC:-Unknown}"
+    _CACHE_DC="${_CACHE_DC:-Unknown}"
+    _CACHE_READY=1
+    return 0
   fi
-  _CACHE_LOC="${_CACHE_LOC:-Unknown}"
-  _CACHE_DC="${_CACHE_DC:-Unknown}"
+
+  # Instant fallbacks to prevent terminal blocking on menu load
+  _CACHE_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'Fetching...')"
+  _CACHE_LOC="Fetching..."
+  _CACHE_DC="Fetching..."
   _CACHE_READY=1
+
+  # Fetch asynchronously in background with strict timeouts
+  (
+    local ip city country org json
+    ip="$(curl -fsSL --max-time 2 https://api.ipify.org 2>/dev/null || true)"
+    if [[ -n "$ip" ]]; then
+      json="$(curl -fsSL --max-time 2 "https://ipinfo.io/${ip}/json" 2>/dev/null || true)"
+      if [[ -n "$json" ]]; then
+        city="$(echo "$json" | tr -d '\n' | sed -n 's/.*"city":[ ]*"\([^"]*\)".*/\1/p' | head -n1)"
+        country="$(echo "$json" | tr -d '\n' | sed -n 's/.*"country":[ ]*"\([^"]*\)".*/\1/p' | head -n1)"
+        org="$(echo "$json" | tr -d '\n' | sed -n 's/.*"org":[ ]*"\([^"]*\)".*/\1/p' | head -n1)"
+      fi
+      cat > "$cache_file" <<EOF
+_CACHE_IP="${ip}"
+_CACHE_LOC="${city}${city:+, }${country:-Unknown}"
+_CACHE_DC="${org:-Unknown}"
+EOF
+    fi
+  ) >/dev/null 2>&1 &
 }
 
 # ── Input validation ──────────────────────────────────────────
@@ -176,66 +218,51 @@ _read_port() {
   done
 }
 
-# ── Session management ────────────────────────────────────────
+# ── Session management (Systemd integrated, replacing screen) ────────
 _session_name() { echo "ox_tunnle_$1"; }
 
-# FIX BUG-ISRUNNING: use grep -qF (fixed string) — avoids tab/space and regex mismatches
 _is_running() {
-  local s; s="$(_session_name "$1")"
-  screen -ls 2>/dev/null | grep -qF "$s"
-}
-
-# FIX BUG-DELETE: stop_slot now waits up to 3s for clean exit, then force-kills
-_stop_slot() {
-  local prof="$1" s; s="$(_session_name "$prof")"
-  _is_running "$prof" || { return 0; }                # already stopped
-  screen -S "$s" -X quit >/dev/null 2>&1 || true
-  local i=0
-  while [[ $i -lt 6 ]] && _is_running "$prof"; do
-    sleep 0.5; i=$((i + 1))
-  done
-  # Force-kill if still alive after 3s
-  if _is_running "$prof"; then
-    screen -S "$s" -X kill >/dev/null 2>&1 || true
-    sleep 0.3
+  local prof="$1"
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    systemctl is-active --quiet "ox-tunnle@${prof}.service" 2>/dev/null
+  else
+    pgrep -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1
   fi
 }
 
-# FIX BUG-DELETE: run_slot now also writes OXTUNNEL_LOG so tail -f works
+_stop_slot() {
+  local prof="$1"
+  _is_running "$prof" || { return 0; }
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    systemctl stop "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
+    systemctl disable "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
+  else
+    pkill -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
+    sleep 0.5
+    pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
+  fi
+}
+
 _run_slot() {
   local prof="$1" f="$CONF/${prof}.env"
   [[ -f "$f" ]] || { _msg_warn "Profile not found: $prof"; return 1; }
   _load_profile "$f"
-  local s; s="$(_session_name "$prof")"
   local log_file="${LOG_DIR}/${prof}.log"
   mkdir -p "$LOG_DIR"
-  # Cleanly stop any existing session first
-  screen -S "$s" -X quit >/dev/null 2>&1 || true; sleep 0.2
+  _stop_slot "$prof" >/dev/null 2>&1 || true; sleep 0.2
 
-  local ULIMIT_NOFILE="${ULIMIT_NOFILE:-1048576}"
-
-  # Each case pipes printf into Python stdin; stdout+stderr → log file via OXTUNNEL_LOG
-  if [[ "$ROLE" == "eu" ]]; then
-    screen -dmS "$s" bash -lc \
-      "ulimit -Hn ${ULIMIT_NOFILE} >/dev/null 2>&1 || true
-       ulimit -Sn ${ULIMIT_NOFILE} >/dev/null 2>&1 || true
-       printf '1\n%s\n%s\n%s\n' '${IRAN_IP}' '${BRIDGE}' '${SYNC}' \
-       | PYTHONUNBUFFERED=1 OXTUNNEL_LOG='${log_file}' OXTUNNEL_POOL=\"\${OXTUNNEL_POOL:-0}\" \
-         python3 '${PY}' >> '${log_file}' 2>&1"
-  elif [[ "${AUTO_SYNC:-true}" == "true" ]]; then
-    screen -dmS "$s" bash -lc \
-      "ulimit -Hn ${ULIMIT_NOFILE} >/dev/null 2>&1 || true
-       ulimit -Sn ${ULIMIT_NOFILE} >/dev/null 2>&1 || true
-       printf '2\n%s\n%s\ny\n' '${BRIDGE}' '${SYNC}' \
-       | PYTHONUNBUFFERED=1 OXTUNNEL_LOG='${log_file}' OXTUNNEL_POOL=\"\${OXTUNNEL_POOL:-0}\" \
-         python3 '${PY}' >> '${log_file}' 2>&1"
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    _install_systemd_service
+    systemctl enable --now "ox-tunnle@${prof}.service" >/dev/null 2>&1
   else
-    screen -dmS "$s" bash -lc \
-      "ulimit -Hn ${ULIMIT_NOFILE} >/dev/null 2>&1 || true
-       ulimit -Sn ${ULIMIT_NOFILE} >/dev/null 2>&1 || true
-       printf '2\n%s\n%s\nn\n%s\n' '${BRIDGE}' '${SYNC}' '${PORTS:-}' \
-       | PYTHONUNBUFFERED=1 OXTUNNEL_LOG='${log_file}' OXTUNNEL_POOL=\"\${OXTUNNEL_POOL:-0}\" \
-         python3 '${PY}' >> '${log_file}' 2>&1"
+    # Non-systemd fallback using background invocation
+    (
+      export ROLE IRAN_IP BRIDGE SYNC AUTO_SYNC PORTS LABEL SECRET
+      export ULIMIT_NOFILE="${ULIMIT_NOFILE:-1048576}" OXTUNNEL_LOG="${log_file}" OXTUNNEL_PROFILE="${prof}"
+      ulimit -Hn "${ULIMIT_NOFILE}" >/dev/null 2>&1 || true
+      ulimit -Sn "${ULIMIT_NOFILE}" >/dev/null 2>&1 || true
+      nohup python3 "${PY}" >> "${log_file}" 2>&1 &
+    ) >/dev/null 2>&1
   fi
   _msg_ok "Started: ${B}$prof${R}"
 }
@@ -247,19 +274,21 @@ _restart_slot() {
 _get_slot_details() {
   local f="$CONF/${1}.env"
   [[ -f "$f" ]] || { echo "–"; return; }
-  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" LABEL=""
+  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" LABEL="" SECRET=""
   _load_profile "$f"
-  local lbl_prefix=""
-  [[ -n "$LABEL" ]] && lbl_prefix="[${LABEL}] "
+  local sec_tag="${SECRET:+ [Auth:ON]}"
   if [[ "$ROLE" == "eu" ]]; then
-    echo "${lbl_prefix}→ ${IRAN_IP} | bridge:${BRIDGE} sync:${SYNC}"
+    echo "Iran:${IRAN_IP:-?} B:${BRIDGE:-7000} S:${SYNC:-7001}${sec_tag}"
   else
-    echo "${lbl_prefix}bridge:${BRIDGE} sync:${SYNC} autosync:${AUTO_SYNC:-true}"
+    if [[ "${AUTO_SYNC:-true}" == "true" ]]; then
+      echo "B:${BRIDGE:-7000} S:${SYNC:-7001} (AutoSync)${sec_tag}"
+    else
+      echo "B:${BRIDGE:-7000} S:${SYNC:-7001} Ports:${PORTS:-}${sec_tag}"
+    fi
   fi
 }
 
-# Ctrl+C only kills tail; the tunnel screen session keeps running
-_logs_slot() {
+_view_logs() {
   local prof="$1" log_file="${LOG_DIR}/${prof}.log"
   echo ""
   if [[ ! -f "$log_file" ]] || [[ ! -s "$log_file" ]]; then
@@ -303,7 +332,7 @@ _delete_slot() {
 _status_slot() {
   local prof="$1" f="$CONF/${prof}.env"
   [[ -f "$f" ]] || { _msg_warn "Profile not found."; return 1; }
-  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" PORTS="" LABEL=""
+  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="" PORTS="" LABEL="" SECRET=""
   _load_profile "$f"
   local st_c="$RED" st_i="○" st_t="Stopped"
   if _is_running "$prof"; then st_c="$GRN"; st_i="●"; st_t="Running"; fi
@@ -320,6 +349,9 @@ _status_slot() {
     echo -e "  ${CYN}Bridge${R}  : ${BRIDGE:-–}   ${CYN}Sync${R}: ${SYNC:-–}"
     echo -e "  ${CYN}AutoSync${R}: ${AUTO_SYNC:-true}${PORTS:+   Ports: $PORTS}"
   fi
+  if [[ -n "$SECRET" ]]; then
+    echo -e "  ${CYN}Auth Token${R}: ${GRN}Enabled (${SECRET:0:8}...)${R}"
+  fi
   echo -e "  ${CYN}Status${R}  : ${st_c}${B}${st_i} ${st_t}${R}"
   echo ""
 }
@@ -331,13 +363,25 @@ _edit_profile() {
   echo -e "  ${CYN}${B}Configure:${R} ${B}$prof${R}  ${DIM}(role: ${role^^})${R}"
   _hr
   # Pre-fill from existing config if editing
-  local ROLE="$role" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL=""
+  local ROLE="$role" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL="" SECRET=""
   [[ -f "$f" ]] && _load_profile "$f" || true
 
   local label_raw
   read -r -p "  Tunnel Label/Name (optional, press Enter to keep '${LABEL:-none}'): " label_raw < /dev/tty || true
   if [[ -n "$label_raw" ]]; then
     LABEL="$(echo "$label_raw" | tr -d '"'\''\\' | cut -c1-30)"
+  fi
+
+  local sec_raw=""
+  read -r -p "  Security Secret Token (optional, Enter to keep '${SECRET:-none}', 'auto' for random hex token): " sec_raw < /dev/tty || true
+  if [[ "${sec_raw,,}" == "auto" ]]; then
+    SECRET="$(head -c 16 /dev/urandom | md5sum <<< "$RANDOM-$(date)" | awk '{print $1}' 2>/dev/null || printf "%032x" "${RANDOM}")"
+  elif [[ -n "$sec_raw" ]]; then
+    if [[ "${sec_raw,,}" == "none" || "${sec_raw,,}" == "clear" ]]; then
+      SECRET=""
+    else
+      SECRET="$(echo "$sec_raw" | tr -d '"'\''\\' | cut -c1-64)"
+    fi
   fi
 
   if [[ "$role" == "eu" ]]; then
@@ -350,9 +394,10 @@ _edit_profile() {
     cat > "$f" <<EOF
 ROLE=eu
 LABEL="${LABEL}"
-IRAN_IP=${IRAN_IP}
+IRAN_IP="${IRAN_IP}"
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
+SECRET="${SECRET}"
 EOF
   else
     BRIDGE="$(_read_port "Bridge port" "${BRIDGE:-7000}")"
@@ -370,6 +415,7 @@ BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 AUTO_SYNC=true
 PORTS=
+SECRET="${SECRET}"
 EOF
     else
       local ports_raw; read -r -p "  Manual ports CSV (e.g. 80,443,2083): " ports_raw < /dev/tty
@@ -380,7 +426,8 @@ LABEL="${LABEL}"
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 AUTO_SYNC=false
-PORTS=${PORTS}
+PORTS="${PORTS}"
+SECRET="${SECRET}"
 EOF
     fi
   fi
@@ -532,45 +579,40 @@ LOG_DIR="${LOG_DIR}"
 MAX="${MAX}"
 EOF
   cat >> "$HC_SCRIPT" <<'HCEOF'
-session_name(){ echo "ox_tunnle_$1"; }
-is_running(){ local s; s="$(session_name "$1")"; screen -ls 2>/dev/null | grep -qF "$s"; }
+is_running(){
+  local prof="$1"
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    systemctl is-active --quiet "ox-tunnle@${prof}.service" 2>/dev/null
+  else
+    pgrep -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1
+  fi
+}
 start_from_profile(){
   local prof="$1" f="${CONF}/${prof}.env"
   [[ -f "$f" ]] || return 0
-  # Safe inline parser — avoids 'source' which breaks with set -e + unquoted values
-  local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL=""
-  local _line _key _val
-  while IFS= read -r _line || [[ -n "$_line" ]]; do
-    [[ -z "$_line" || "$_line" =~ ^[[:space:]]*# ]] && continue
-    if [[ "$_line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-      _key="${BASH_REMATCH[1]}"; _val="${BASH_REMATCH[2]}"
-      _val="${_val#\"}" ; _val="${_val%\"}"
-      _val="${_val#\'" ; _val="${_val%\'}"
-      printf -v "$_key" '%s' "$_val"
-    fi
-  done < "$f"
-  local s; s="$(session_name "$prof")"
-  local log_file="${LOG_DIR}/${prof}.log"
-  mkdir -p "$LOG_DIR"
-  screen -S "$s" -X quit >/dev/null 2>&1 || true; sleep 0.2
-  if [[ "${ROLE}" == "eu" ]]; then
-    screen -dmS "$s" bash -lc \
-      "ulimit -Hn 1048576 >/dev/null 2>&1||true; ulimit -Sn 1048576 >/dev/null 2>&1||true
-       printf '1\n%s\n%s\n%s\n' '${IRAN_IP}' '${BRIDGE}' '${SYNC}' \
-       | PYTHONUNBUFFERED=1 OXTUNNEL_LOG='${log_file}' OXTUNNEL_POOL=\"${OXTUNNEL_POOL:-0}\" \
-         python3 '${PY}' >> '${log_file}' 2>&1"
-  elif [[ "${AUTO_SYNC:-true}" == "true" ]]; then
-    screen -dmS "$s" bash -lc \
-      "ulimit -Hn 1048576 >/dev/null 2>&1||true; ulimit -Sn 1048576 >/dev/null 2>&1||true
-       printf '2\n%s\n%s\ny\n' '${BRIDGE}' '${SYNC}' \
-       | PYTHONUNBUFFERED=1 OXTUNNEL_LOG='${log_file}' OXTUNNEL_POOL=\"${OXTUNNEL_POOL:-0}\" \
-         python3 '${PY}' >> '${log_file}' 2>&1"
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    systemctl enable --now "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
   else
-    screen -dmS "$s" bash -lc \
-      "ulimit -Hn 1048576 >/dev/null 2>&1||true; ulimit -Sn 1048576 >/dev/null 2>&1||true
-       printf '2\n%s\n%s\nn\n%s\n' '${BRIDGE}' '${SYNC}' '${PORTS:-}' \
-       | PYTHONUNBUFFERED=1 OXTUNNEL_LOG='${log_file}' OXTUNNEL_POOL=\"${OXTUNNEL_POOL:-0}\" \
-         python3 '${PY}' >> '${log_file}' 2>&1"
+    local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL="" SECRET=""
+    local _line _key _val
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+      [[ -z "$_line" || "$_line" =~ ^[[:space:]]*# ]] && continue
+      if [[ "$_line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+        _key="${BASH_REMATCH[1]}"; _val="${BASH_REMATCH[2]}"
+        _val="${_val#\"}" ; _val="${_val%\"}"
+        _val="${_val#\'}" ; _val="${_val%\'}"
+        printf -v "$_key" '%s' "$_val"
+      fi
+    done < "$f"
+    local log_file="${LOG_DIR}/${prof}.log"
+    mkdir -p "$LOG_DIR"
+    pkill -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true; sleep 0.2
+    (
+      export ROLE IRAN_IP BRIDGE SYNC AUTO_SYNC PORTS LABEL SECRET
+      export ULIMIT_NOFILE="${ULIMIT_NOFILE:-1048576}" OXTUNNEL_LOG="${log_file}" OXTUNNEL_PROFILE="${prof}"
+      ulimit -Hn 1048576 >/dev/null 2>&1 || true; ulimit -Sn 1048576 >/dev/null 2>&1 || true
+      nohup python3 "${PY}" >> "${log_file}" 2>&1 &
+    ) >/dev/null 2>&1
   fi
 }
 [[ -f "$PY" ]] || exit 0
