@@ -450,8 +450,13 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             global_conn_error = False
             idle_workers += 1
             try:
-                # Wait for target port from IR server
-                hdr = await reader.readexactly(2)
+                # Wait for target port from IR server with randomized TTL (35s-55s) to eliminate silent ISP NAT drops
+                hdr = await asyncio.wait_for(reader.readexactly(2), timeout=random.uniform(35.0, 55.0))
+            except asyncio.TimeoutError:
+                # Gracefully recycle idle connection to keep pool fresh and 100% active
+                try: writer.close()
+                except Exception: pass
+                return
             finally:
                 idle_workers -= 1
 
@@ -507,25 +512,49 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             total = idle_workers + active_workers
             if idle_workers < desired_idle and total < max_workers:
                 to_spawn = min(desired_idle - idle_workers, max_workers - total)
-                batch = min(to_spawn, 5)
+                if idle_workers < (desired_idle // 4):
+                    batch = min(to_spawn, 25)
+                elif idle_workers < (desired_idle // 2):
+                    batch = min(to_spawn, 15)
+                else:
+                    batch = min(to_spawn, 8)
                 for _ in range(batch):
                     task = asyncio.create_task(reverse_link_worker())
                     worker_tasks.add(task)
                     task.add_done_callback(worker_tasks.discard)
             
-            await asyncio.sleep(0.05 if idle_workers < 20 else 0.1)
+            await asyncio.sleep(0.02 if idle_workers < (desired_idle // 2) else 0.08)
+
+    async def smart_watchdog_loop():
+        """Periodically monitors worker pool health and triggers instant recovery if starving."""
+        starve_cycles = 0
+        while not stop_event.is_set():
+            await asyncio.sleep(5.0)
+            if idle_workers == 0 and active_workers == 0 and not global_conn_error:
+                starve_cycles += 1
+                if starve_cycles >= 2:
+                    log.warning("[WATCHDOG] ⚠ Worker pool starving (0 idle workers). Forcing burst replenishment...")
+                    for _ in range(min(50, desired_idle)):
+                        task = asyncio.create_task(reverse_link_worker())
+                        worker_tasks.add(task)
+                        task.add_done_callback(worker_tasks.discard)
+                    starve_cycles = 0
+            else:
+                starve_cycles = 0
 
     sync_task = asyncio.create_task(port_sync_loop())
     manager_task = asyncio.create_task(pool_manager())
+    watchdog_task = asyncio.create_task(smart_watchdog_loop())
 
-    log.info(f"[EU] Running (AsyncIO Engine) | IRAN={iran_ip} bridge={bridge_port} sync={sync_port} pool={pool_size} (Max {max_workers})")
+    log.info(f"[EU] Running (AsyncIO Engine) | IRAN={iran_ip} bridge={bridge_port} sync={sync_port} pool={pool_size} (Max {max_workers}) [Smart Watchdog: Active]")
     await stop_event.wait()
     log.info("[EU] Stopping tasks gracefully...")
     sync_task.cancel()
     manager_task.cancel()
+    watchdog_task.cancel()
     for t in list(worker_tasks):
         t.cancel()
-    await asyncio.gather(sync_task, manager_task, *worker_tasks, return_exceptions=True)
+    await asyncio.gather(sync_task, manager_task, watchdog_task, *worker_tasks, return_exceptions=True)
     log.info("[EU] Stopped.")
 
 
@@ -558,7 +587,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                 writer.close()
                 return
             try:
-                pool.put_nowait((reader, writer))
+                pool.put_nowait((reader, writer, time.time()))
             except Exception as e:
                 log.warning(f"[IR-BRIDGE] Failed to put worker from {peer_str} into pool: {e}")
                 writer.close()
@@ -573,9 +602,16 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
         while time.time() < deadline:
             try:
                 rem_time = max(0.05, deadline - time.time())
-                cand_r, cand_w = await asyncio.wait_for(pool.get(), timeout=rem_time)
+                cand_item = await asyncio.wait_for(pool.get(), timeout=rem_time)
             except (asyncio.TimeoutError, asyncio.QueueEmpty):
                 break
+
+            cand_r, cand_w, cand_t = cand_item
+            if time.time() - cand_t > 55.0:
+                # Evict stale connection past TTL
+                try: cand_w.close()
+                except Exception: pass
+                continue
 
             if is_socket_alive_async(cand_w, cand_r):
                 europe = (cand_r, cand_w)
