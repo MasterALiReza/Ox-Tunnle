@@ -77,28 +77,18 @@ After installation, launch the Tunnel Manager:
 sudo ox-tunnle
 ```
 
-### 1️⃣ Complete Setup & Dependencies
-
-Select from menu:
-```
-5) Install / Complete Setup
-```
-This automatically installs required dependencies and registers the native systemd template service.
-
----
-
-### 2️⃣ Create Tunnel Profile
+### 1️⃣ Create IRAN Tunnel Profile
 
 ```
-1) Create/Update profile
-2) IRAN Server
+1) New / Edit Profile
+→ Select Slot (11–20 for IRAN, e.g. Slot 11 corresponds to ir1)
 ```
 
-- **Select Slot (1–10):** Choose an identifier (e.g., Slot 1 corresponds to `ir1`).
+- **Select Slot (11–20):** Choose an identifier (e.g., Slot 11 corresponds to `ir1`).
 - **Enter Bridge Port:** Default is `7000` (must match on both servers).
 - **Enter Sync Port:** Default is `7001` (must match on both servers and be distinct from Bridge Port).
 - **AutoSync Mode:** Enable (`y`) to automatically detect and open ports, or disable (`n`) to manually provide a comma-separated list of ports.
-- **Security Token (HMAC):** Enter a strong custom secret token or press Enter to auto-generate a 32-character hex key. *Save this key to enter on the EU server!*
+- **Security Token (HMAC):** Enter a custom secret token or press Enter to accept the auto-generated 32-character hex key. *Copy this key to enter on the EU server!*
 
 ---
 
@@ -116,11 +106,10 @@ sudo ox-tunnle
 ```
 Select:
 ```
-5) Install / Complete Setup
-1) Create/Update profile
-2) EU Server
+1) New / Edit Profile
+→ Select Slot (1–10 for EU, e.g. Slot 1 corresponds to eu1)
 ```
-- Choose the same slot number (e.g., `eu1`).
+- Choose the matching slot number (e.g., Slot 1 corresponds to `eu1`).
 - Enter your **IR Server IP Address**.
 - Enter the identical **Bridge Port** and **Sync Port**.
 - Enter the exact same **Security Token** generated on the IR server.
@@ -133,11 +122,9 @@ You can control active slots directly from the interactive menu or using standar
 
 ## Via Menu:
 ```
-2) Manage tunnel (select slot)
-→ Select IRAN or EU
-→ Select Slot Number
-→ 2) Start / Restart
-→ 5) Status / Live Logs
+2) Manage Tunnels
+→ Select Tunnel Number
+→ 1) Start / 2) Stop / 3) Restart / 5) View Live Log
 ```
 
 ## Via Native Systemd CLI:

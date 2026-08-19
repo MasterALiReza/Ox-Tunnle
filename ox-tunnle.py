@@ -3,7 +3,7 @@
 Ox Tunnle — High-Performance Reverse TCP Tunnel
 https://github.com/MasterALiReza/Ox-Tunnle
 """
-import os, sys, time, socket, struct, subprocess, re, signal, logging, hashlib, hmac, random, asyncio, errno
+import os, sys, time, socket, struct, subprocess, re, signal, logging, hashlib, hmac, random, asyncio, errno, shutil
 try:
     import resource
 except ImportError:
@@ -328,12 +328,23 @@ async def pipe_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
 
 async def bridge_async(reader_a: asyncio.StreamReader, writer_a: asyncio.StreamWriter,
                        reader_b: asyncio.StreamReader, writer_b: asyncio.StreamWriter) -> Tuple[int, int]:
-    """Bridge two asynchronous TCP streams full-duplex concurrently until both complete."""
+    """Bridge two asynchronous TCP streams full-duplex concurrently until completion or disconnect."""
     t1 = asyncio.create_task(pipe_async(reader_a, writer_b))
     t2 = asyncio.create_task(pipe_async(reader_b, writer_a))
     
-    # Wait for BOTH directions to complete full data exchange
-    await asyncio.gather(t1, t2, return_exceptions=True)
+    # Wait for either direction to complete or error
+    done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+    
+    # Allow pending direction a brief drain window to flush any in-flight response packets
+    if pending:
+        try:
+            await asyncio.wait(pending, timeout=0.5)
+        except Exception:
+            pass
+        for p in pending:
+            if not p.done():
+                p.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
     
     for w in (writer_a, writer_b):
         try:
@@ -341,6 +352,12 @@ async def bridge_async(reader_a: asyncio.StreamReader, writer_a: asyncio.StreamW
                 w.close()
         except Exception:
             pass
+    for w in (writer_a, writer_b):
+        try:
+            await w.wait_closed()
+        except Exception:
+            pass
+
     bytes_a = t1.result() if t1.done() and not t1.cancelled() and not isinstance(t1.exception(), Exception) else 0
     bytes_b = t2.result() if t2.done() and not t2.cancelled() and not isinstance(t2.exception(), Exception) else 0
     return (bytes_a, bytes_b)
@@ -420,7 +437,8 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
     worker_tasks = set()
     idle_workers = 0
     active_workers = 0
-    # Keep 60-120 ultra-fresh warm standby workers ready for instant handshakes
+    connecting_workers = 0
+    # Keep 60-120 warm standby workers ready for instant handshakes
     desired_idle = min(max(pool_size // 4, 60), 120)
     max_workers = max(pool_size * 4, 2500)
     last_conn_err_time = 0
@@ -435,6 +453,8 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 if not await authenticate_client_async(reader, writer, secret):
                     log.warning(f"[SYNC] Authentication FAILED with Iran server {iran_ip}:{sync_port} (Secret mismatch or MITM).")
                     writer.close()
+                    try: await writer.wait_closed()
+                    except Exception: pass
                     await asyncio.sleep(SYNC_INTERVAL)
                     continue
                 log.info(f"[SYNC] Connected & Authenticated with Iran server {iran_ip}:{sync_port}")
@@ -458,13 +478,17 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                         pass
             except Exception as e:
                 log.warning(f"[SYNC] AutoSync connection lost to {iran_ip}:{sync_port}: {e}")
-                try: writer.close()
-                except Exception: pass
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
                 await asyncio.sleep(SYNC_INTERVAL)
 
     async def reverse_link_worker():
-        nonlocal idle_workers, active_workers, last_conn_err_time, global_conn_error
+        nonlocal idle_workers, active_workers, connecting_workers, last_conn_err_time, global_conn_error
         
+        connecting_workers += 1
         # 1. Connect and Authenticate with Iran Bridge
         try:
             reader, writer = await asyncio.wait_for(
@@ -473,8 +497,11 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             tune_writer(writer)
             
             if not await authenticate_client_async(reader, writer, secret):
-                try: writer.close()
-                except Exception: pass
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
                 await asyncio.sleep(1.0)
                 return
         except Exception as e:
@@ -485,6 +512,8 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             global_conn_error = True
             await asyncio.sleep(1.0)
             return
+        finally:
+            connecting_workers -= 1
 
         global_conn_error = False
 
@@ -497,8 +526,11 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             # If closed immediately (<1.2s) without data, Iran pool was full — backoff briefly to avoid storm
             if time.time() - worker_start_time < 1.2:
                 await asyncio.sleep(1.0)
-            try: writer.close()
-            except Exception: pass
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
             return
         finally:
             idle_workers -= 1
@@ -519,6 +551,8 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 except Exception:
                     pass
                 writer.close()
+                try: await writer.wait_closed()
+                except Exception: pass
                 return
 
             try:
@@ -535,40 +569,42 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             pass
         finally:
             active_workers -= 1
-            try: writer.close()
-            except Exception: pass
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     async def pool_manager():
         while not stop_event.is_set():
             if global_conn_error and idle_workers > 5:
                 await asyncio.sleep(1.0)
+                continue
                 
-            total = idle_workers + active_workers
-            if idle_workers < desired_idle and total < max_workers:
-                to_spawn = min(desired_idle - idle_workers, max_workers - total)
-                if idle_workers < (desired_idle // 4):
-                    batch = min(to_spawn, 25)
-                elif idle_workers < (desired_idle // 2):
-                    batch = min(to_spawn, 15)
-                else:
-                    batch = min(to_spawn, 6)
+            total_running = len(worker_tasks)
+            needed_idle = max(0, desired_idle - (idle_workers + connecting_workers))
+            available_capacity = max(0, max_workers - total_running)
+            
+            if needed_idle > 0 and available_capacity > 0:
+                batch = min(needed_idle, available_capacity, 10)
                 for _ in range(batch):
                     task = asyncio.create_task(reverse_link_worker())
                     worker_tasks.add(task)
                     task.add_done_callback(worker_tasks.discard)
             
-            await asyncio.sleep(0.01 if idle_workers < (desired_idle // 4) else (0.05 if idle_workers < (desired_idle // 2) else 0.15))
+            sleep_time = 0.1 if (idle_workers + connecting_workers) < (desired_idle // 2) else 0.25
+            await asyncio.sleep(sleep_time)
 
     async def smart_watchdog_loop():
         """Periodically monitors worker pool health and triggers instant recovery if starving."""
         starve_cycles = 0
         while not stop_event.is_set():
             await asyncio.sleep(5.0)
-            if idle_workers == 0 and active_workers == 0 and not global_conn_error:
+            if idle_workers == 0 and active_workers == 0 and connecting_workers == 0 and not global_conn_error:
                 starve_cycles += 1
                 if starve_cycles >= 2:
-                    log.warning("[WATCHDOG] ⚠ Worker pool starving (0 idle workers). Forcing burst replenishment...")
-                    for _ in range(min(30, desired_idle)):
+                    log.warning("[WATCHDOG] ⚠ Worker pool starving (0 idle workers). Replenishing pool...")
+                    for _ in range(min(15, desired_idle)):
                         task = asyncio.create_task(reverse_link_worker())
                         worker_tasks.add(task)
                         task.add_done_callback(worker_tasks.discard)
@@ -725,7 +761,6 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
             active_servers[p] = srv
             failed_ports.pop(p, None)
             log.info(f"[IR] Port Active: {p}")
-            asyncio.create_task(srv.serve_forever())
         except Exception as e:
             active_servers.pop(p, None)
             if p not in failed_ports:
@@ -888,6 +923,7 @@ def main():
     parser.set_defaults(auto_sync=True)
     parser.add_argument("--ports", "-p", default="", help="Manual ports CSV if auto-sync is disabled")
     parser.add_argument("--secret", default=os.environ.get("OXTUNNEL_SECRET", ""), help="Secret auth token")
+    parser.add_argument("--profile", default=os.environ.get("OXTUNNEL_PROFILE", ""), help="Profile name (e.g. ir1, eu1)")
 
     args, unknown = parser.parse_known_args()
 

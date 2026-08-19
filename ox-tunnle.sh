@@ -90,7 +90,7 @@ _load_profile() {
   local f="$1"
   [[ -f "$f" ]] || return 1
   # Reset all expected variables first
-  ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL="" SECRET=""
+  ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL="" SECRET="" ENABLED="true"
   local line key val
   while IFS= read -r line || [[ -n "$line" ]]; do
     # skip blank lines and comments
@@ -107,11 +107,31 @@ _load_profile() {
   done < "$f"
 }
 
+_set_env_val() {
+  local file="$1" key="$2" val="$3"
+  [[ -f "$file" ]] || return 1
+  local tmp; tmp="$(mktemp)"
+  local found=0
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^${key}= ]]; then
+      echo "${key}=\"${val}\"" >> "$tmp"
+      found=1
+    else
+      echo "$line" >> "$tmp"
+    fi
+  done < "$file"
+  if [[ "$found" -eq 0 ]]; then
+    echo "${key}=\"${val}\"" >> "$tmp"
+  fi
+  mv -f "$tmp" "$file"
+}
+
 _install_systemd_service() {
   if ! command -v systemctl >/dev/null 2>&1; then return 0; fi
   local unit_file="/etc/systemd/system/ox-tunnle@.service"
-  # Always rewrite/ensure unit file contains TimeoutStopSec
-  if [[ ! -f "$unit_file" ]] || ! grep -q "TimeoutStopSec" "$unit_file"; then
+  # Always rewrite/ensure unit file contains TimeoutStopSec and --profile
+  if [[ ! -f "$unit_file" ]] || ! grep -q "TimeoutStopSec" "$unit_file" || ! grep -q -- "--profile" "$unit_file"; then
     cat > "$unit_file" <<EOF
 [Unit]
 Description=Ox Tunnle Service (%I)
@@ -126,7 +146,7 @@ Environment="OXTUNNEL_PROFILE=%i"
 Environment="ULIMIT_NOFILE=1048576"
 LimitNOFILE=1048576
 LimitNPROC=1048576
-ExecStart=/usr/bin/env python3 "${PY}"
+ExecStart=/usr/bin/env python3 "${PY}" --profile %i
 Restart=always
 RestartSec=3s
 KillMode=mixed
@@ -183,8 +203,6 @@ _CACHE_READY=0
 _fetch_server_info() {
   local cache_file="/tmp/.oxtunnel_server_info.cache"
   if [[ -f "$cache_file" && -s "$cache_file" ]]; then
-    # FIX HIGH-03: Safe key=value parser instead of 'source' to prevent shell injection.
-    # /tmp is world-writable; sourcing it as root would allow privilege escalation.
     local _line _key _val
     while IFS= read -r _line || [[ -n "$_line" ]]; do
       [[ -z "$_line" || "$_line" =~ ^# ]] && continue
@@ -206,9 +224,9 @@ _fetch_server_info() {
   fi
 
   # Instant fallbacks to prevent terminal blocking on menu load
-  _CACHE_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'Fetching...')"
-  _CACHE_LOC="Fetching..."
-  _CACHE_DC="Fetching..."
+  _CACHE_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'Unknown')"
+  _CACHE_LOC="Local Host"
+  _CACHE_DC="Local Network"
   _CACHE_READY=1
 
   # Fetch asynchronously in background with strict timeouts
@@ -227,6 +245,12 @@ _CACHE_IP="${ip}"
 _CACHE_LOC="${city}${city:+, }${country:-Unknown}"
 _CACHE_DC="${org:-Unknown}"
 EOF
+    else
+      cat > "$cache_file" <<EOF
+_CACHE_IP="${_CACHE_IP}"
+_CACHE_LOC="${_CACHE_LOC}"
+_CACHE_DC="${_CACHE_DC}"
+EOF
     fi
   ) >/dev/null 2>&1 &
 }
@@ -243,18 +267,18 @@ _validate_port() {
   [[ "$p" =~ ^[0-9]+$ ]] && [[ "$p" -ge 1 ]] && [[ "$p" -le 65535 ]]
 }
 _read_ip() {
-  local prompt="$1" ip
+  local prompt="$1" ip=""
   while true; do
-    read -r -p "  ${prompt}: " ip < /dev/tty
+    read -r -p "  ${prompt}: " ip < /dev/tty || true
     ip="${ip//[^0-9.]/}"
     if _validate_ip "$ip"; then echo "$ip"; return; fi
     _msg_warn "Invalid IP address. Try again."
   done
 }
 _read_port() {
-  local prompt="$1" default="${2:-}" p
+  local prompt="$1" default="${2:-}" p=""
   while true; do
-    read -r -p "  ${prompt}${default:+ [${default}]}: " p < /dev/tty
+    read -r -p "  ${prompt}${default:+ [${default}]}: " p < /dev/tty || true
     p="${p:-$default}"; p="${p//[^0-9]/}"
     if _validate_port "$p"; then echo "$p"; return; fi
     _msg_warn "Invalid port (1–65535). Try again."
@@ -273,7 +297,7 @@ _generate_token() {
   echo "${tok:0:32}"
 }
 
-# ── Session management (Systemd integrated, replacing screen) ────────
+# ── Session management (Systemd integrated) ───────────────────
 _session_name() { echo "ox_tunnle_$1"; }
 
 _is_running() {
@@ -281,29 +305,24 @@ _is_running() {
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     systemctl is-active --quiet "ox-tunnle@${prof}.service" 2>/dev/null
   else
-    pgrep -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1
+    pgrep -f "${PY}.*--profile[ =]${prof}" >/dev/null 2>&1 || pgrep -f "OXTUNNEL_PROFILE=${prof}" >/dev/null 2>&1
   fi
 }
 
 _stop_slot() {
   local prof="$1"
+  local f="$CONF/${prof}.env"
+  [[ -f "$f" ]] && _set_env_val "$f" "ENABLED" "false"
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
-    # Stop in background to prevent hanging on older systemd units missing TimeoutStopSec
-    systemctl stop "ox-tunnle@${prof}.service" >/dev/null 2>&1 &
-    local stop_pid=$!
-    # MED-01: Wait 1.5s (was 0.5s) to allow asyncio graceful shutdown before SIGKILL
-    sleep 1.5
-    # Final cleanup: kill any remaining process after graceful shutdown window
-    pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
-    wait $stop_pid 2>/dev/null || true
+    systemctl stop "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
     systemctl disable "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
     systemctl reset-failed "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
   else
-    pkill -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
-    pkill -f "${CONF}/${prof}.env" >/dev/null 2>&1 || true
-    # MED-01: Wait 1.0s (was 0.3s) for graceful shutdown
-    sleep 1.0
-    pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
+    pkill -TERM -f "${PY}.*--profile[ =]${prof}" >/dev/null 2>&1 || true
+    pkill -TERM -f "OXTUNNEL_PROFILE=${prof}" >/dev/null 2>&1 || true
+    sleep 0.8
+    pkill -9 -f "${PY}.*--profile[ =]${prof}" >/dev/null 2>&1 || true
+    pkill -9 -f "OXTUNNEL_PROFILE=${prof}" >/dev/null 2>&1 || true
   fi
 }
 
@@ -311,9 +330,11 @@ _run_slot() {
   local prof="$1" f="$CONF/${prof}.env"
   [[ -f "$f" ]] || { _msg_warn "Profile not found: $prof"; return 1; }
   _load_profile "$f"
+  _set_env_val "$f" "ENABLED" "true"
   local log_file="${LOG_DIR}/${prof}.log"
   mkdir -p "$LOG_DIR"
   _stop_slot "$prof" >/dev/null 2>&1 || true; sleep 0.3
+  _set_env_val "$f" "ENABLED" "true"
 
   # Pre-flight port check to warn users
   if have ss; then
@@ -355,13 +376,13 @@ _run_slot() {
     systemctl enable --now "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
     systemctl restart "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
   else
-    # Non-systemd fallback using background invocation
+    # Non-systemd fallback using background invocation with explicit --profile
     (
-      export ROLE IRAN_IP BRIDGE SYNC AUTO_SYNC PORTS LABEL SECRET
+      export ROLE IRAN_IP BRIDGE SYNC AUTO_SYNC PORTS LABEL SECRET ENABLED="true"
       export ULIMIT_NOFILE="${ULIMIT_NOFILE:-1048576}" OXTUNNEL_LOG="${log_file}" OXTUNNEL_PROFILE="${prof}"
       ulimit -Hn "${ULIMIT_NOFILE}" >/dev/null 2>&1 || true
       ulimit -Sn "${ULIMIT_NOFILE}" >/dev/null 2>&1 || true
-      nohup python3 "${PY}" >> "${log_file}" 2>&1 &
+      nohup python3 "${PY}" --profile "${prof}" >> "${log_file}" 2>&1 &
     ) >/dev/null 2>&1
   fi
   _msg_ok "Started: ${B}$prof${R}"
@@ -521,48 +542,68 @@ _show_config() {
 # ── Edit / create profile ─────────────────────────────────────
 _edit_profile() {
   local prof="$1" role="${1%%[0-9]*}" f="$CONF/${prof}.env"
+  [[ "$role" == "iran" ]] && role="ir"
   echo ""
   echo -e "  ${CYN}${B}Configure:${R} ${B}$prof${R}  ${DIM}(role: ${role^^})${R}"
   _hr
   # Pre-fill from existing config if editing
-  local ROLE="$role" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL="" SECRET=""
+  local ROLE="$role" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL="" SECRET="" ENABLED="true"
   [[ -f "$f" ]] && _load_profile "$f" || true
 
-  local label_raw
+  local label_raw=""
   read -r -p "  Tunnel Label/Name (optional, press Enter to keep '${LABEL:-none}'): " label_raw < /dev/tty || true
   if [[ -n "$label_raw" ]]; then
     LABEL="$(echo "$label_raw" | tr -d '"'\''\\' | cut -c1-30)"
   fi
 
   local sec_raw="" default_tok="${SECRET}"
-  if [[ -z "$default_tok" ]]; then
-    default_tok="$(_generate_token)"
-  fi
-  
-  echo ""
-  echo -e "  ${CYN}${B}── Security Token Configuration ───────────────────────${R}"
-  if [[ -n "$SECRET" ]]; then
-    echo -e "  ${DIM}Current Token:${R} ${GRN}${SECRET}${R}"
-    read -r -p "  Enter new token [Press Enter to keep current, 'auto' for new, 'none' to disable]: " sec_raw < /dev/tty || true
-  else
-    echo -e "  ${DIM}Auto-Generated Token:${R} ${GRN}${default_tok}${R}"
-    read -r -p "  Enter custom token [Press Enter to accept auto-generated, 'none' to disable]: " sec_raw < /dev/tty || true
-  fi
+  if [[ "$role" == "eu" ]]; then
+    echo ""
+    echo -e "  ${CYN}${B}── Security Token Configuration (EU Client) ─────────${R}"
+    if [[ -n "$SECRET" ]]; then
+      echo -e "  ${DIM}Current Token:${R} ${GRN}${SECRET}${R}"
+      read -r -p "  Enter IRAN server token [Press Enter to keep current, 'none' to disable]: " sec_raw < /dev/tty || true
+    else
+      echo -e "  ${DIM}Note:${R} You MUST enter the identical Secret Token generated on your IRAN server."
+      read -r -p "  Enter IRAN Secret Token [Paste token, or 'none' if unauthenticated]: " sec_raw < /dev/tty || true
+    fi
 
-  if [[ -z "$sec_raw" ]]; then
-    SECRET="$default_tok"
-  elif [[ "${sec_raw,,}" == "auto" || "${sec_raw,,}" == "gen" || "${sec_raw,,}" == "random" ]]; then
-    SECRET="$(_generate_token)"
-  elif [[ "${sec_raw,,}" == "none" || "${sec_raw,,}" == "clear" || "${sec_raw,,}" == "off" || "${sec_raw,,}" == "disable" || "${sec_raw,,}" == "no" || "${sec_raw,,}" == "n" ]]; then
-    SECRET=""
+    if [[ -z "$sec_raw" ]]; then
+      SECRET="${SECRET}"
+    elif [[ "${sec_raw,,}" == "none" || "${sec_raw,,}" == "clear" || "${sec_raw,,}" == "off" || "${sec_raw,,}" == "disable" || "${sec_raw,,}" == "no" || "${sec_raw,,}" == "n" ]]; then
+      SECRET=""
+    else
+      SECRET="$(echo "$sec_raw" | tr -d '"'\''\\' | cut -c1-64)"
+    fi
   else
-    SECRET="$(echo "$sec_raw" | tr -d '"'\''\\' | cut -c1-64)"
+    if [[ -z "$default_tok" ]]; then
+      default_tok="$(_generate_token)"
+    fi
+    echo ""
+    echo -e "  ${CYN}${B}── Security Token Configuration (Iran Server) ───────${R}"
+    if [[ -n "$SECRET" ]]; then
+      echo -e "  ${DIM}Current Token:${R} ${GRN}${SECRET}${R}"
+      read -r -p "  Enter new token [Press Enter to keep current, 'auto' for new, 'none' to disable]: " sec_raw < /dev/tty || true
+    else
+      echo -e "  ${DIM}Auto-Generated Token:${R} ${GRN}${default_tok}${R}"
+      read -r -p "  Enter custom token [Press Enter to accept auto-generated, 'none' to disable]: " sec_raw < /dev/tty || true
+    fi
+
+    if [[ -z "$sec_raw" ]]; then
+      SECRET="$default_tok"
+    elif [[ "${sec_raw,,}" == "auto" || "${sec_raw,,}" == "gen" || "${sec_raw,,}" == "random" ]]; then
+      SECRET="$(_generate_token)"
+    elif [[ "${sec_raw,,}" == "none" || "${sec_raw,,}" == "clear" || "${sec_raw,,}" == "off" || "${sec_raw,,}" == "disable" || "${sec_raw,,}" == "no" || "${sec_raw,,}" == "n" ]]; then
+      SECRET=""
+    else
+      SECRET="$(echo "$sec_raw" | tr -d '"'\''\\' | cut -c1-64)"
+    fi
   fi
 
   if [[ -n "$SECRET" ]]; then
     echo -e "  ${GRN}✔ Auth Token Active:${R} ${B}${CYN}${SECRET}${R}"
   else
-    echo -e "  ${YEL}⚠ Auth Token Disabled${R} (Not recommended for public servers)"
+    echo -e "  ${YLW}⚠ Auth Token Disabled${R} (Not recommended for public servers)"
   fi
   echo -e "  ${CYN}───────────────────────────────────────────────────────${R}"
   echo ""
@@ -581,6 +622,7 @@ IRAN_IP="${IRAN_IP}"
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 SECRET="${SECRET}"
+ENABLED=true
 OXTUNNEL_LOG="${LOG_DIR}/${prof}.log"
 OXTUNNEL_PROFILE="${prof}"
 EOF
@@ -590,31 +632,33 @@ EOF
     if [[ "$BRIDGE" == "$SYNC" ]]; then
       _msg_warn "Bridge and Sync ports must be different."; return 1
     fi
-    local as_choice; read -r -p "  Auto-Sync ports from EU? (Y/n): " as_choice < /dev/tty
+    local as_choice=""; read -r -p "  Auto-Sync ports from EU? (Y/n): " as_choice < /dev/tty || true
     as_choice="${as_choice:-y}"
     if [[ "${as_choice,,}" == "y" ]]; then
       cat > "$f" <<EOF
-ROLE=iran
+ROLE=ir
 LABEL="${LABEL}"
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 AUTO_SYNC=true
 PORTS=
 SECRET="${SECRET}"
+ENABLED=true
 OXTUNNEL_LOG="${LOG_DIR}/${prof}.log"
 OXTUNNEL_PROFILE="${prof}"
 EOF
     else
-      local ports_raw; read -r -p "  Manual ports CSV (e.g. 80,443,2083): " ports_raw < /dev/tty
+      local ports_raw=""; read -r -p "  Manual ports CSV (e.g. 80,443,2083): " ports_raw < /dev/tty || true
       PORTS="${ports_raw//[^0-9,]/}"
       cat > "$f" <<EOF
-ROLE=iran
+ROLE=ir
 LABEL="${LABEL}"
 BRIDGE=${BRIDGE}
 SYNC=${SYNC}
 AUTO_SYNC=false
 PORTS="${PORTS}"
 SECRET="${SECRET}"
+ENABLED=true
 OXTUNNEL_LOG="${LOG_DIR}/${prof}.log"
 OXTUNNEL_PROFILE="${prof}"
 EOF
@@ -774,16 +818,24 @@ is_running(){
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     systemctl is-active --quiet "ox-tunnle@${prof}.service" 2>/dev/null
   else
-    pgrep -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1
+    pgrep -f "${PY}.*--profile[ =]${prof}" >/dev/null 2>&1 || pgrep -f "OXTUNNEL_PROFILE=${prof}" >/dev/null 2>&1
   fi
+}
+is_enabled_profile(){
+  local prof="$1" f="${CONF}/${prof}.env"
+  [[ -f "$f" ]] || return 1
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    systemctl is-enabled --quiet "ox-tunnle@${prof}.service" 2>/dev/null && return 0
+  fi
+  grep -qi "^ENABLED=[\"']\?true[\"']\?" "$f" 2>/dev/null
 }
 start_from_profile(){
   local prof="$1" f="${CONF}/${prof}.env"
   [[ -f "$f" ]] || return 0
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
-    systemctl enable --now "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
+    systemctl restart "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
   else
-    local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL="" SECRET=""
+    local ROLE="" IRAN_IP="" BRIDGE="" SYNC="" AUTO_SYNC="true" PORTS="" LABEL="" SECRET="" ENABLED="true"
     local _line _key _val
     while IFS= read -r _line || [[ -n "$_line" ]]; do
       [[ -z "$_line" || "$_line" =~ ^[[:space:]]*# ]] && continue
@@ -796,21 +848,25 @@ start_from_profile(){
     done < "$f"
     local log_file="${LOG_DIR}/${prof}.log"
     mkdir -p "$LOG_DIR"
-    pkill -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true; sleep 0.2
+    pkill -f "${PY}.*--profile[ =]${prof}" >/dev/null 2>&1 || true
+    pkill -f "OXTUNNEL_PROFILE=${prof}" >/dev/null 2>&1 || true
+    sleep 0.2
     (
-      export ROLE IRAN_IP BRIDGE SYNC AUTO_SYNC PORTS LABEL SECRET
+      export ROLE IRAN_IP BRIDGE SYNC AUTO_SYNC PORTS LABEL SECRET ENABLED="true"
       export ULIMIT_NOFILE="${ULIMIT_NOFILE:-1048576}" OXTUNNEL_LOG="${log_file}" OXTUNNEL_PROFILE="${prof}"
       ulimit -Hn 1048576 >/dev/null 2>&1 || true; ulimit -Sn 1048576 >/dev/null 2>&1 || true
-      nohup python3 "${PY}" >> "${log_file}" 2>&1 &
+      nohup python3 "${PY}" --profile "${prof}" >> "${log_file}" 2>&1 &
     ) >/dev/null 2>&1
   fi
 }
 [[ -f "$PY" ]] || exit 0
-for role in eu iran; do
+for role in eu ir iran; do
   for i in $(seq 1 "$MAX"); do
     prof="${role}${i}"
     [[ -f "${CONF}/${prof}.env" ]] || continue
-    is_running "$prof" || start_from_profile "$prof" >/dev/null 2>&1 || true
+    if is_enabled_profile "$prof" && ! is_running "$prof"; then
+      start_from_profile "$prof" >/dev/null 2>&1 || true
+    fi
   done
 done
 HCEOF
@@ -820,7 +876,7 @@ HCEOF
 _enable_cron() {
   _install_hc_script
   echo ""
-  local interval; read -r -p "  Health-check interval in minutes [1]: " interval < /dev/tty || true
+  local interval=""; read -r -p "  Health-check interval in minutes [1]: " interval < /dev/tty || true
   interval="${interval:-1}"
   [[ "$interval" =~ ^[0-9]+$ ]] || interval=1
   [[ "$interval" -ge 1 ]] || interval=1
@@ -854,11 +910,15 @@ _print_banner() {
 # Returns list of all saved profiles (both roles, all slots)
 _list_saved_profiles() {
   local list=()
-  for role in eu iran; do
-    for i in $(seq 1 "$MAX"); do
-      local prof="${role}${i}"
-      [[ -f "$CONF/${prof}.env" ]] && list+=("$prof")
-    done
+  for i in $(seq 1 "$MAX"); do
+    [[ -f "$CONF/eu${i}.env" ]] && list+=("eu${i}")
+  done
+  for i in $(seq 1 "$MAX"); do
+    if [[ -f "$CONF/ir${i}.env" ]]; then
+      list+=("ir${i}")
+    elif [[ -f "$CONF/iran${i}.env" ]]; then
+      list+=("iran${i}")
+    fi
   done
   echo "${list[@]:-}"
 }
@@ -877,7 +937,6 @@ _print_all_slots() {
   for i in $(seq 1 "$MAX"); do
     local prof="eu${i}"
     n=$((n + 1))
-    # Read label in a subshell to avoid polluting globals across iterations
     local lbl st_c="$DIM" st_t="(empty)"
     if [[ -f "$CONF/${prof}.env" ]]; then
       _load_profile "$CONF/${prof}.env"; lbl="${LABEL:-}"
@@ -900,7 +959,8 @@ _print_all_slots() {
   echo -e "  ${DIM}  #   Name        Label                 Status${R}"
   _hr
   for i in $(seq 1 "$MAX"); do
-    local prof="iran${i}"
+    local prof="ir${i}"
+    [[ ! -f "$CONF/${prof}.env" && -f "$CONF/iran${i}.env" ]] && prof="iran${i}"
     n=$((n + 1))
     local lbl st_c="$DIM" st_t="(empty)"
     if [[ -f "$CONF/${prof}.env" ]]; then
@@ -919,13 +979,7 @@ _print_all_slots() {
 
 # Print numbered list of ONLY saved profiles for manage
 _print_saved_profiles() {
-  local profs=()
-  for role in eu iran; do
-    for i in $(seq 1 "$MAX"); do
-      local prof="${role}${i}"
-      [[ -f "$CONF/${prof}.env" ]] && profs+=("$prof")
-    done
-  done
+  local profs=($(_list_saved_profiles))
   if [[ ${#profs[@]} -eq 0 ]]; then
     echo ""; _msg_info "No saved profiles. Create one first."; echo ""; return 1
   fi
@@ -936,6 +990,7 @@ _print_saved_profiles() {
   for prof in "${profs[@]}"; do
     n=$((n + 1))
     local role="${prof%%[0-9]*}"
+    [[ "$role" == "iran" ]] && role="ir"
     local st_c="$RED" st_t="Stopped"
     if _is_running "$prof"; then st_c="$GRN"; st_t="Running"; fi
     local details; details="$(_get_slot_details "$prof")"
@@ -948,28 +1003,30 @@ _print_saved_profiles() {
 
 # Resolve slot number → profile name (all 20 slots)
 _slot_num_to_prof() {
-  local n="$1" nn=0
-  for role in eu iran; do
-    for i in $(seq 1 "$MAX"); do
-      nn=$((nn + 1))
-      if [[ "$nn" -eq "$n" ]]; then echo "${role}${i}"; return; fi
-    done
-  done
-  echo ""
+  local n="$1"
+  if [[ "$n" -ge 1 && "$n" -le 10 ]]; then
+    echo "eu${n}"
+  elif [[ "$n" -ge 11 && "$n" -le 20 ]]; then
+    local idx=$((n - 10))
+    if [[ -f "$CONF/iran${idx}.env" && ! -f "$CONF/ir${idx}.env" ]]; then
+      echo "iran${idx}"
+    else
+      echo "ir${idx}"
+    fi
+  else
+    echo ""
+  fi
 }
 
 # Resolve saved-profile index → profile name
 _saved_idx_to_prof() {
-  local n="$1" nn=0
-  for role in eu iran; do
-    for i in $(seq 1 "$MAX"); do
-      local prof="${role}${i}"
-      [[ -f "$CONF/${prof}.env" ]] || continue
-      nn=$((nn + 1))
-      if [[ "$nn" -eq "$n" ]]; then echo "$prof"; return; fi
-    done
-  done
-  echo ""
+  local n="$1"
+  local profs=($(_list_saved_profiles))
+  if [[ "$n" -ge 1 && "$n" -le "${#profs[@]}" ]]; then
+    echo "${profs[$((n - 1))]}"
+  else
+    echo ""
+  fi
 }
 
 # ════════════════════════════════════════════════════════════
@@ -1039,7 +1096,7 @@ _manage_slot_menu() {
     _hr
     _menu_item "0" "◀  Back"
     _hr; echo ""
-    local choice; read -r -p "  Select: " choice < /dev/tty
+    local choice=""; read -r -p "  Select: " choice < /dev/tty || true
     case "$choice" in
       1) echo ""; _run_slot "$prof"; pause ;;
       2) echo ""; _stop_slot "$prof"; _msg_ok "Stopped."; pause ;;
@@ -1067,7 +1124,7 @@ _new_profile_menu() {
     echo ""
     _menu_item "0" "◀  Back"
     _hr; echo ""
-    local choice; read -r -p "  Enter slot number (1-20) or 0 to go back: " choice < /dev/tty
+    local choice=""; read -r -p "  Enter slot number (1-20) or 0 to go back: " choice < /dev/tty || true
     [[ "$choice" =~ ^[0-9]+$ ]] || { _msg_warn "Please enter a number."; sleep 0.8; continue; }
     [[ "$choice" -eq 0 ]] && return
     [[ "$choice" -ge 1 && "$choice" -le 20 ]] || { _msg_warn "Enter a number between 1 and 20."; sleep 0.8; continue; }
@@ -1095,7 +1152,7 @@ _manage_tunnels_menu() {
     _hr
     _menu_item "0" "◀  Back"
     _hr; echo ""
-    local choice; read -r -p "  Select tunnel number, action (S/K/R), or 0: " choice < /dev/tty
+    local choice=""; read -r -p "  Select tunnel number, action (S/K/R), or 0: " choice < /dev/tty || true
     case "${choice,,}" in
       0) return ;;
       s) _bulk_start_all; pause ;;
@@ -1123,17 +1180,15 @@ _all_status_menu() {
   _dhr
   echo -e "  ${CYN}${B}  📊  ALL TUNNEL STATUS${R}"
   _dhr
-  local found=0
-  for role in eu iran; do
-    for i in $(seq 1 "$MAX"); do
-      local prof="${role}${i}"
-      [[ -f "$CONF/${prof}.env" ]] || continue
-      found=1
+  local profs=($(_list_saved_profiles))
+  if [[ ${#profs[@]} -eq 0 ]]; then
+    echo ""; _msg_info "No saved profiles found."; echo ""
+  else
+    for prof in "${profs[@]}"; do
       _status_slot "$prof"
       _hr
     done
-  done
-  if [[ $found -eq 0 ]]; then echo ""; _msg_info "No saved profiles found."; echo ""; fi
+  fi
   pause
 }
 
@@ -1161,7 +1216,7 @@ _cron_menu() {
     _hr
     _menu_item "0" "◀  Back"
     _hr; echo ""
-    local choice; read -r -p "  Select: " choice < /dev/tty
+    local choice=""; read -r -p "  Select: " choice < /dev/tty || true
     case "$choice" in
       1) _enable_cron; pause ;;
       2) _disable_cron; pause ;;
@@ -1186,14 +1241,14 @@ _script_menu() {
     _hr
     _menu_item "0" "◀  Back"
     _hr; echo ""
-    local choice; read -r -p "  Select: " choice < /dev/tty
+    local choice=""; read -r -p "  Select: " choice < /dev/tty || true
     case "$choice" in
       1) echo ""; _install_script; pause ;;
       2) echo ""; _update_script; pause ;;
       3)
         echo ""
         _msg_warn "Uninstall will remove ox-tunnle from system. Tunnels keep running."
-        local c; read -r -p "  Confirm (yes/N): " c < /dev/tty
+        local c=""; read -r -p "  Confirm (yes/N): " c < /dev/tty || true
         if [[ "$c" == "yes" ]]; then _uninstall_script; pause; return; else _msg_info "Cancelled."; fi
         pause ;;
       0) return ;;
@@ -1226,7 +1281,7 @@ _main_menu() {
     _menu_item "0" "🚪  Exit"
     _hr; echo ""
 
-    local choice; read -r -p "  Select: " choice < /dev/tty
+    local choice=""; read -r -p "  Select: " choice < /dev/tty || true
     case "$choice" in
       1) _new_profile_menu ;;
       2) _manage_tunnels_menu ;;
