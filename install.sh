@@ -82,18 +82,19 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 download_file() {
-  local filename="$1" dst="$2"
+  local filename="$1" dst="$2" ts
+  ts="$(date +%s)"
   local urls=(
-    "https://ghproxy.net/https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
-    "https://mirror.ghproxy.com/https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
-    "https://cdn.jsdelivr.net/gh/MasterALiReza/Ox-Tunnle@main/${filename}"
-    "https://raw.githack.com/MasterALiReza/Ox-Tunnle/main/${filename}"
-    "https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}"
+    "https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}?v=${ts}"
+    "https://ghfast.top/https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}?v=${ts}"
+    "https://ghproxy.net/https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}?v=${ts}"
+    "https://mirror.ghproxy.com/https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${filename}?v=${ts}"
+    "https://raw.githack.com/MasterALiReza/Ox-Tunnle/main/${filename}?v=${ts}"
   )
   for url in "${urls[@]}"; do
     # Try normal curl, then insecure (-k) fallback if SSL cert is outdated on Iran VPS
-    if curl -fsSL --connect-timeout 5 --retry 2 "$url" -o "$dst" 2>/dev/null \
-       || curl -fsSLk --connect-timeout 5 --retry 2 "$url" -o "$dst" 2>/dev/null; then
+    if curl -fsSL -H "Cache-Control: no-cache" --connect-timeout 5 --retry 2 "$url" -o "$dst" 2>/dev/null \
+       || curl -fsSLk -H "Cache-Control: no-cache" --connect-timeout 5 --retry 2 "$url" -o "$dst" 2>/dev/null; then
       if [[ -s "$dst" ]]; then
         return 0
       fi
@@ -116,9 +117,11 @@ fi
 [[ -s "$TMP/ox-tunnle" ]]    || err "Downloaded manager is empty!"
 [[ -s "$TMP/ox-tunnle.py" ]] || err "Downloaded tunnel core is empty!"
 
-# Quick validation: first line must be a shebang
+# Quick validation: first line must be a shebang and script must pass bash syntax check
 head -n1 "$TMP/ox-tunnle" | grep -q "^#!" \
   || err "Downloaded manager does not look like a script (bad download?)."
+bash -n "$TMP/ox-tunnle" \
+  || err "Downloaded manager failed syntax check (corrupted download). Please retry."
 
 # ── Install files ─────────────────────────────────────────────
 info "Installing files..."
