@@ -333,6 +333,8 @@ _run_slot() {
         _msg_warn "Port ${p} is in use by another process. The tunnel might loop/fail."
       fi
     done
+  fi
+
   # Auto-open Bridge & Sync ports in UFW / firewall-cmd / iptables on Iran role
   if [[ "${ROLE,,}" == "ir" || "${ROLE,,}" == "iran" ]]; then
     if [[ -n "$BRIDGE" && "$BRIDGE" =~ ^[0-9]+$ ]]; then
