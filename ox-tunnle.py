@@ -40,7 +40,7 @@ if _log_env:
 
 # --------- Tunables ----------
 DIAL_TIMEOUT   = 5
-KEEPALIVE_SECS = 20
+KEEPALIVE_SECS = 10
 SOCKBUF        = 16 * 1024 * 1024   # 16 MB high-throughput socket buffer
 BUF_COPY       = 128 * 1024          # 128 KB userspace stream copy buffer
 POOL_WAIT      = 5                   # 5 seconds pool wait
@@ -420,8 +420,9 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
     worker_tasks = set()
     idle_workers = 0
     active_workers = 0
-    desired_idle = pool_size
-    max_workers = pool_size * 5
+    # Keep 30-50 ultra-fresh warm standby workers ready for instant handshakes
+    desired_idle = min(max(pool_size // 6, 30), 60)
+    max_workers = max(pool_size * 4, 2000)
     last_conn_err_time = 0
     global_conn_error = False
 
@@ -472,12 +473,9 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             tune_writer(writer)
             
             if not await authenticate_client_async(reader, writer, secret):
-                now = time.time()
-                if now - last_conn_err_time > 15:
-                    log.warning(f"[EU-WORKER] Auth FAILED on bridge {iran_ip}:{bridge_port}")
-                    last_conn_err_time = now
-                writer.close()
-                global_conn_error = True
+                try: writer.close()
+                except Exception: pass
+                await asyncio.sleep(1.0)
                 return
         except Exception as e:
             now = time.time()
@@ -485,6 +483,7 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 log.warning(f"[EU-WORKER] Cannot reach Iran bridge {iran_ip}:{bridge_port} -> {e}")
                 last_conn_err_time = now
             global_conn_error = True
+            await asyncio.sleep(1.0)
             return
 
         global_conn_error = False
@@ -493,9 +492,8 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
         idle_workers += 1
         worker_start_time = time.time()
         try:
-            hdr = await asyncio.wait_for(reader.readexactly(2), timeout=random.uniform(35.0, 55.0))
+            hdr = await asyncio.wait_for(reader.readexactly(2), timeout=random.uniform(25.0, 40.0))
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
-            # Normal idle recycling or peer socket closed — clean exit
             # If closed immediately (<1.2s) without data, Iran pool was full — backoff briefly to avoid storm
             if time.time() - worker_start_time < 1.2:
                 await asyncio.sleep(1.0)
@@ -549,17 +547,17 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             if idle_workers < desired_idle and total < max_workers:
                 to_spawn = min(desired_idle - idle_workers, max_workers - total)
                 if idle_workers < (desired_idle // 4):
-                    batch = min(to_spawn, 20)
+                    batch = min(to_spawn, 15)
                 elif idle_workers < (desired_idle // 2):
-                    batch = min(to_spawn, 10)
+                    batch = min(to_spawn, 8)
                 else:
-                    batch = min(to_spawn, 5)
+                    batch = min(to_spawn, 4)
                 for _ in range(batch):
                     task = asyncio.create_task(reverse_link_worker())
                     worker_tasks.add(task)
                     task.add_done_callback(worker_tasks.discard)
             
-            await asyncio.sleep(0.05 if idle_workers < (desired_idle // 2) else 0.15)
+            await asyncio.sleep(0.05 if idle_workers < (desired_idle // 2) else 0.20)
 
     async def smart_watchdog_loop():
         """Periodically monitors worker pool health and triggers instant recovery if starving."""
@@ -570,7 +568,7 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 starve_cycles += 1
                 if starve_cycles >= 2:
                     log.warning("[WATCHDOG] ⚠ Worker pool starving (0 idle workers). Forcing burst replenishment...")
-                    for _ in range(min(50, desired_idle)):
+                    for _ in range(min(30, desired_idle)):
                         task = asyncio.create_task(reverse_link_worker())
                         worker_tasks.add(task)
                         task.add_done_callback(worker_tasks.discard)
@@ -609,7 +607,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
     stop_event = asyncio.Event()
     setup_signals(stop_event, loop)
 
-    pool = asyncio.LifoQueue(maxsize=pool_size * 2)
+    pool = asyncio.LifoQueue(maxsize=150)
     active_servers: Dict[int, Any] = {}
     sync_sem = asyncio.Semaphore(MAX_SYNC_CONNS)
 
@@ -641,60 +639,66 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
         log.info(f"[TRAFFIC] 🟢 Inbound connection from {client_addr} on Port {target_port}")
         
         deadline = time.time() + POOL_WAIT
-        europe: Optional[Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = None
+        eu_reader: Optional[asyncio.StreamReader] = None
+        eu_writer: Optional[asyncio.StreamWriter] = None
+        
+        # Resilient worker acquisition with automatic retry across pool
         while time.time() < deadline:
-            try:
-                rem_time = max(0.05, deadline - time.time())
-                cand_item = await asyncio.wait_for(pool.get(), timeout=rem_time)
-            except (asyncio.TimeoutError, asyncio.QueueEmpty):
+            candidate: Optional[Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = None
+            while time.time() < deadline:
+                try:
+                    rem_time = max(0.05, deadline - time.time())
+                    cand_item = await asyncio.wait_for(pool.get(), timeout=rem_time)
+                except (asyncio.TimeoutError, asyncio.QueueEmpty):
+                    break
+
+                cand_r, cand_w, cand_t = cand_item
+                if time.time() - cand_t > 30.0:
+                    try: cand_w.close()
+                    except Exception: pass
+                    continue
+
+                if is_socket_alive_async(cand_w, cand_r):
+                    candidate = (cand_r, cand_w)
+                    break
+                try:
+                    cand_w.close()
+                except Exception:
+                    pass
+
+            if candidate is None:
                 break
 
-            cand_r, cand_w, cand_t = cand_item
-            if time.time() - cand_t > 55.0:
-                # Evict stale connection past TTL
+            cand_r, cand_w = candidate
+            try:
+                cand_w.write(struct.pack("!H", target_port))
+                await asyncio.wait_for(cand_w.drain(), timeout=4.0)
+                
+                status = await asyncio.wait_for(cand_r.readexactly(1), timeout=4.0)
+                if status == b"\x00":
+                    eu_reader = cand_r
+                    eu_writer = cand_w
+                    break
+                else:
+                    log.error(f"[ERROR] ❌ Port {target_port} FAILED for {client_addr}: Service on EU is DOWN or NOT listening on 127.0.0.1:{target_port}")
+                    try: cand_w.close()
+                    except Exception: pass
+                    break
+            except Exception:
+                # Worker died or closed just before handshake — close it and retry next worker in queue!
                 try: cand_w.close()
                 except Exception: pass
                 continue
 
-            if is_socket_alive_async(cand_w, cand_r):
-                europe = (cand_r, cand_w)
-                break
-            try:
-                cand_w.close()
-            except Exception:
-                pass
-
-        if europe is None:
-            log.error(f"[ERROR] ❌ Port {target_port} FAILED for {client_addr}: Worker pool is EMPTY! (EU server has no active reverse workers. Check if EU tunnel service is running)")
+        if eu_reader is None or eu_writer is None:
+            log.error(f"[ERROR] ❌ Port {target_port} FAILED for {client_addr}: No healthy EU reverse worker available.")
             try: user_writer.close()
-            except Exception: pass
-            return
-
-        eu_reader, eu_writer = europe
-        try:
-            eu_writer.write(struct.pack("!H", target_port))
-            await asyncio.wait_for(eu_writer.drain(), timeout=5.0)
-            
-            status = await asyncio.wait_for(eu_reader.readexactly(1), timeout=5.0)
-            if status != b"\x00":
-                log.error(f"[ERROR] ❌ Port {target_port} FAILED for {client_addr}: Local service on EU server is DOWN or NOT listening on 127.0.0.1:{target_port}! (Check Xray/V2Ray on EU server)")
-                try: user_writer.close()
-                except Exception: pass
-                try: eu_writer.close()
-                except Exception: pass
-                return
-                
-        except Exception as e:
-            log.error(f"[ERROR] ❌ Port {target_port} FAILED for {client_addr}: Bridge communication error with EU worker -> {e}")
-            try: user_writer.close()
-            except Exception: pass
-            try: eu_writer.close()
             except Exception: pass
             return
 
         log.info(f"[TRAFFIC] ⚡ Stream ACTIVE: {client_addr} <-> EU Port {target_port}")
         rx, tx = await bridge_async(user_reader, user_writer, eu_reader, eu_writer)
-        log.info(f"[TRAFFIC] ⏹ Connection CLOSED for {client_addr} on Port {target_port} (Transferred: {rx:,} bytes UP, {tx:,} bytes DOWN)")
+        log.info(f"[TRAFFIC] ⏹ Connection CLOSED for {client_addr} on Port {target_port} (UP: {rx:,} B, DOWN: {tx:,} B)")
 
     def create_user_handler(target_port: int):
         async def _cb(r: asyncio.StreamReader, w: asyncio.StreamWriter):
