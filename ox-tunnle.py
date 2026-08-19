@@ -360,10 +360,14 @@ async def get_listen_ports_async(exclude_bridge: int, exclude_sync: int) -> list
     ports: set = set()
     for ln in out.splitlines()[1:]:
         parts = ln.split()
-        if len(parts) < 5:
+        if len(parts) < 4:
             continue
-        local_addr = parts[4]
+        # Local Address:Port is column 4 (0-indexed: parts[3]) in 'ss -lntp'
+        local_addr = parts[3] if len(parts) >= 4 else ""
         m = _port_re.search(local_addr)
+        if not m and len(parts) >= 5:
+            # Fallback check on parts[4] if ss format differs on older kernels
+            m = _port_re.search(parts[4])
         if not m:
             continue
         p = int(m.group(1))
@@ -616,8 +620,14 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
             await handle_user_client(r, w, target_port)
         return _cb
 
+    failed_ports: Dict[int, float] = {}
+
     async def open_port(p: int):
         if p in active_servers:
+            return
+        # Don't spam retries on locally in-use/failed ports within 60s
+        now = time.time()
+        if p in failed_ports and now - failed_ports[p] < 60:
             return
         active_servers[p] = "pending"
         try:
@@ -627,16 +637,20 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                 backlog=16384
             )
             active_servers[p] = srv
+            failed_ports.pop(p, None)
             log.info(f"[IR] Port Active: {p}")
             asyncio.create_task(srv.serve_forever())
         except Exception as e:
             active_servers.pop(p, None)
-            log.error(f"[IR] Cannot open port {p}: {e}")
+            if p not in failed_ports:
+                log.warning(f"[IR] Cannot bind port {p} (already in use or permission denied): {e}")
+            failed_ports[p] = now
 
     async def prune_inactive_ports(synced_ports: set):
         to_close = [p for p, srv in active_servers.items() if p not in synced_ports and srv != "pending"]
         for p in to_close:
             srv = active_servers.pop(p, None)
+            failed_ports.pop(p, None)
             log.info(f"[IR] Pruning inactive port {p}")
             try:
                 if hasattr(srv, "close"):
@@ -646,6 +660,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                 pass
 
     async def handle_sync_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        tune_writer(writer)
         peer = writer.get_extra_info("peername")
         peer_str = f"{peer[0]}:{peer[1]}" if peer else "unknown"
         async with sync_sem:
@@ -655,6 +670,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                     writer.close()
                     return
                 log.info(f"[IR-SYNC] EU client connected & authenticated for AutoSync from {peer_str}")
+                warned_blocked_ports: set = set()
                 while not stop_event.is_set():
                     try:
                         h = await asyncio.wait_for(reader.readexactly(1), timeout=KEEPALIVE_SECS * 2)
@@ -672,8 +688,10 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                         safe_ports = set()
                         for p in current_ports:
                             if p <= 1024 or p in SYNC_BLOCKED_PORTS:
-                                log.warning(f"[IR-SYNC] Refusing to open privileged/blocked port {p} "
-                                            f"(requested by EU AutoSync — security policy)")
+                                if p not in warned_blocked_ports:
+                                    log.warning(f"[IR-SYNC] Refusing to open privileged/blocked port {p} "
+                                                f"(requested by EU AutoSync — security policy)")
+                                    warned_blocked_ports.add(p)
                             else:
                                 safe_ports.add(p)
                         for p in safe_ports:
