@@ -166,6 +166,20 @@ def is_socket_alive_async(writer: asyncio.StreamWriter, reader: asyncio.StreamRe
         return True
 
 
+def ensure_firewall_port(port: int):
+    """Auto-allow port in UFW / iptables / firewalld if active."""
+    try:
+        if shutil.which("ufw"):
+            subprocess.run(["ufw", "allow", f"{port}/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        elif shutil.which("firewall-cmd"):
+            subprocess.run(["firewall-cmd", f"--add-port={port}/tcp", "--permanent"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            subprocess.run(["firewall-cmd", "--reload"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        elif shutil.which("iptables"):
+            subprocess.run(["iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+    except Exception:
+        pass
+
+
 def setup_signals(stop_event: asyncio.Event, loop: asyncio.AbstractEventLoop):
     def _shutdown(*_):
         log.info("Shutdown signal received, stopping gracefully...")
@@ -692,6 +706,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
             return
         active_servers[p] = "pending"
         try:
+            ensure_firewall_port(p)
             srv = await asyncio.start_server(
                 create_user_handler(p),
                 "0.0.0.0", p,
@@ -765,6 +780,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                 except Exception: pass
 
     try:
+        ensure_firewall_port(bridge_port)
         bridge_srv = await asyncio.start_server(handle_bridge_client, "0.0.0.0", bridge_port, backlog=16384)
         log.info(f"[IR] Bridge listening on {bridge_port}")
     except Exception as e:
@@ -773,6 +789,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
 
     sync_srv = None
     try:
+        ensure_firewall_port(sync_port)
         sync_srv = await asyncio.start_server(handle_sync_client, "0.0.0.0", sync_port, backlog=1024)
         log.info(f"[IR] Sync listening on {sync_port} (AutoSync={auto_sync})")
     except Exception as e:

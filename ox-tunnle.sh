@@ -333,6 +333,18 @@ _run_slot() {
         _msg_warn "Port ${p} is in use by another process. The tunnel might loop/fail."
       fi
     done
+  # Auto-open Bridge & Sync ports in UFW / firewall-cmd / iptables on Iran role
+  if [[ "${ROLE,,}" == "ir" || "${ROLE,,}" == "iran" ]]; then
+    if [[ -n "$BRIDGE" && "$BRIDGE" =~ ^[0-9]+$ ]]; then
+      command -v ufw >/dev/null 2>&1 && ufw allow "${BRIDGE}/tcp" >/dev/null 2>&1 || true
+      command -v firewall-cmd >/dev/null 2>&1 && { firewall-cmd --add-port="${BRIDGE}/tcp" --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; } || true
+      command -v iptables >/dev/null 2>&1 && iptables -I INPUT -p tcp --dport "${BRIDGE}" -j ACCEPT >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$SYNC" && "$SYNC" =~ ^[0-9]+$ ]]; then
+      command -v ufw >/dev/null 2>&1 && ufw allow "${SYNC}/tcp" >/dev/null 2>&1 || true
+      command -v firewall-cmd >/dev/null 2>&1 && { firewall-cmd --add-port="${SYNC}/tcp" --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; } || true
+      command -v iptables >/dev/null 2>&1 && iptables -I INPUT -p tcp --dport "${SYNC}" -j ACCEPT >/dev/null 2>&1 || true
+    fi
   fi
 
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
