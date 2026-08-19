@@ -41,8 +41,8 @@ if _log_env:
 # --------- Tunables ----------
 DIAL_TIMEOUT   = 5
 KEEPALIVE_SECS = 20
-SOCKBUF        = 8 * 1024 * 1024    # 8 MB standard socket buffer
-BUF_COPY       = 64 * 1024           # 64 KB userspace buffer (optimized from 256KB to reduce RAM)
+SOCKBUF        = 16 * 1024 * 1024   # 16 MB high-throughput socket buffer
+BUF_COPY       = 128 * 1024          # 128 KB userspace stream copy buffer
 POOL_WAIT      = 5                   # 5 seconds pool wait
 SYNC_INTERVAL  = 3
 MAX_SYNC_CONNS = 50
@@ -278,15 +278,20 @@ async def authenticate_server_async(reader: asyncio.StreamReader, writer: asynci
 # --------- Async Data Piping and Bridging ----------
 
 async def pipe_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
-    """High-efficiency asynchronous byte stream copying with byte counting."""
+    """High-efficiency asynchronous byte stream copying with pipelined throughput."""
     total_bytes = 0
+    transport = writer.transport
     try:
-        while not reader.at_eof():
+        while True:
             data = await reader.read(BUF_COPY)
             if not data:
                 break
             total_bytes += len(data)
             writer.write(data)
+            # Pipelined backpressure: only await drain if kernel write buffer exceeds threshold
+            if transport and transport.get_write_buffer_size() > 256 * 1024:
+                await writer.drain()
+        if transport and transport.get_write_buffer_size() > 0:
             await writer.drain()
     except (asyncio.CancelledError, ConnectionError, OSError):
         pass
@@ -294,29 +299,36 @@ async def pipe_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
         pass
     finally:
         try:
-            if not writer.is_closing():
+            if writer.can_write_eof():
+                writer.write_eof()
+            elif not writer.is_closing():
                 writer.close()
         except Exception:
-            pass
+            try:
+                if not writer.is_closing():
+                    writer.close()
+            except Exception:
+                pass
     return total_bytes
 
 
 async def bridge_async(reader_a: asyncio.StreamReader, writer_a: asyncio.StreamWriter,
                        reader_b: asyncio.StreamReader, writer_b: asyncio.StreamWriter) -> Tuple[int, int]:
-    """Bridge two asynchronous TCP streams concurrently and return (bytes_a_to_b, bytes_b_to_a)."""
+    """Bridge two asynchronous TCP streams full-duplex concurrently until both complete."""
     t1 = asyncio.create_task(pipe_async(reader_a, writer_b))
     t2 = asyncio.create_task(pipe_async(reader_b, writer_a))
-    done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
-    for t in pending:
-        t.cancel()
+    
+    # Wait for BOTH directions to complete full data exchange
+    await asyncio.gather(t1, t2, return_exceptions=True)
+    
     for w in (writer_a, writer_b):
         try:
             if not w.is_closing():
                 w.close()
         except Exception:
             pass
-    bytes_a = t1.result() if t1.done() and not t1.cancelled() else 0
-    bytes_b = t2.result() if t2.done() and not t2.cancelled() else 0
+    bytes_a = t1.result() if t1.done() and not t1.cancelled() and not isinstance(t1.exception(), Exception) else 0
+    bytes_b = t2.result() if t2.done() and not t2.cancelled() and not isinstance(t2.exception(), Exception) else 0
     return (bytes_a, bytes_b)
 
 
@@ -438,9 +450,10 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
     async def reverse_link_worker():
         nonlocal idle_workers, active_workers, last_conn_err_time, global_conn_error
         
+        # 1. Connect and Authenticate with Iran Bridge
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(iran_ip, bridge_port), timeout=10.0
+                asyncio.open_connection(iran_ip, bridge_port), timeout=8.0
             )
             tune_writer(writer)
             
@@ -452,34 +465,30 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 writer.close()
                 global_conn_error = True
                 return
-
-            global_conn_error = False
-            idle_workers += 1
-            try:
-                # Wait for target port from IR server with randomized TTL (35s-55s) to eliminate silent ISP NAT drops
-                hdr = await asyncio.wait_for(reader.readexactly(2), timeout=random.uniform(35.0, 55.0))
-            except asyncio.TimeoutError:
-                # Gracefully recycle idle connection to keep pool fresh and 100% active
-                try: writer.close()
-                except Exception: pass
-                return
-            finally:
-                idle_workers -= 1
-
-        except (asyncio.IncompleteReadError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
-            return
         except Exception as e:
-            if isinstance(e, (ConnectionRefusedError, socket.gaierror, TimeoutError, OSError)):
-                global_conn_error = True
-                now = time.time()
-                if now - last_conn_err_time > 30:
-                    log.warning(f"[EU-WORKER] Cannot reach Iran bridge {iran_ip}:{bridge_port} -> {e}")
-                    last_conn_err_time = now
+            now = time.time()
+            if now - last_conn_err_time > 30:
+                log.warning(f"[EU-WORKER] Cannot reach Iran bridge {iran_ip}:{bridge_port} -> {e}")
+                last_conn_err_time = now
+            global_conn_error = True
             return
 
-        # Bridge active
+        global_conn_error = False
+
+        # 2. Wait in Pool (with TTL) for incoming user traffic from Iran
+        idle_workers += 1
+        try:
+            hdr = await asyncio.wait_for(reader.readexactly(2), timeout=random.uniform(35.0, 55.0))
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
+            # Normal idle recycling or peer socket closed — clean exit
+            try: writer.close()
+            except Exception: pass
+            return
+        finally:
+            idle_workers -= 1
+
+        # 3. Active Stream Bridge
         active_workers += 1
-        
         try:
             (target_port,) = struct.unpack("!H", hdr)
             try:
@@ -487,7 +496,7 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                     asyncio.open_connection("127.0.0.1", target_port), timeout=5.0
                 )
             except Exception as e:
-                log.error(f"[EU-WORKER] ❌ Target port {target_port} UNREACHABLE on EU (127.0.0.1:{target_port}) -> {e}. Is Xray/V2Ray running on port {target_port}?")
+                log.error(f"[EU-WORKER] ❌ Target port {target_port} UNREACHABLE on EU (127.0.0.1:{target_port}) -> {e}")
                 try:
                     writer.write(b"\x01")
                     await asyncio.wait_for(writer.drain(), timeout=2.0)
