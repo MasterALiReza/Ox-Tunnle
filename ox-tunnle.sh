@@ -396,7 +396,9 @@ _view_logs() {
           -e "s/\[IR-SYNC\]/\x1b[1;36m[IR-SYNC]\x1b[0m/g" \
           -e "s/\[IR-BRIDGE\]/\x1b[1;34m[IR-BRIDGE]\x1b[0m/g" \
           -e "s/\[IR-TRAFFIC\]/\x1b[1;31m[IR-TRAFFIC]\x1b[0m/g" \
-          -e "s/\[EU-WORKER\]/\x1b[1;33m[EU-WORKER]\x1b[0m/g" || true
+          -e "s/\[EU-WORKER\]/\x1b[1;33m[EU-WORKER]\x1b[0m/g" \
+          -e "s/\[TRAFFIC\]/\x1b[1;36m[TRAFFIC]\x1b[0m/g" \
+          -e "s/\[WATCHDOG\]/\x1b[1;35m[WATCHDOG]\x1b[0m/g" || true
       else
         journalctl -u "ox-tunnle@${prof}.service" -n 80 -f 2>/dev/null || true
       fi
@@ -423,7 +425,9 @@ _view_logs() {
       -e "s/\[IR-SYNC\]/\x1b[1;36m[IR-SYNC]\x1b[0m/g" \
       -e "s/\[IR-BRIDGE\]/\x1b[1;34m[IR-BRIDGE]\x1b[0m/g" \
       -e "s/\[IR-TRAFFIC\]/\x1b[1;31m[IR-TRAFFIC]\x1b[0m/g" \
-      -e "s/\[EU-WORKER\]/\x1b[1;33m[EU-WORKER]\x1b[0m/g" || true
+      -e "s/\[EU-WORKER\]/\x1b[1;33m[EU-WORKER]\x1b[0m/g" \
+      -e "s/\[TRAFFIC\]/\x1b[1;36m[TRAFFIC]\x1b[0m/g" \
+      -e "s/\[WATCHDOG\]/\x1b[1;35m[WATCHDOG]\x1b[0m/g" || true
   else
     tail -n 80 -f "$log_file" 2>/dev/null || true
   fi

@@ -277,13 +277,15 @@ async def authenticate_server_async(reader: asyncio.StreamReader, writer: asynci
 
 # --------- Async Data Piping and Bridging ----------
 
-async def pipe_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    """High-efficiency asynchronous byte stream copying."""
+async def pipe_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
+    """High-efficiency asynchronous byte stream copying with byte counting."""
+    total_bytes = 0
     try:
         while not reader.at_eof():
             data = await reader.read(BUF_COPY)
             if not data:
                 break
+            total_bytes += len(data)
             writer.write(data)
             await writer.drain()
     except (asyncio.CancelledError, ConnectionError, OSError):
@@ -296,11 +298,12 @@ async def pipe_async(reader: asyncio.StreamReader, writer: asyncio.StreamWriter)
                 writer.close()
         except Exception:
             pass
+    return total_bytes
 
 
 async def bridge_async(reader_a: asyncio.StreamReader, writer_a: asyncio.StreamWriter,
-                       reader_b: asyncio.StreamReader, writer_b: asyncio.StreamWriter):
-    """Bridge two asynchronous TCP streams concurrently."""
+                       reader_b: asyncio.StreamReader, writer_b: asyncio.StreamWriter) -> Tuple[int, int]:
+    """Bridge two asynchronous TCP streams concurrently and return (bytes_a_to_b, bytes_b_to_a)."""
     t1 = asyncio.create_task(pipe_async(reader_a, writer_b))
     t2 = asyncio.create_task(pipe_async(reader_b, writer_a))
     done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
@@ -312,6 +315,9 @@ async def bridge_async(reader_a: asyncio.StreamReader, writer_a: asyncio.StreamW
                 w.close()
         except Exception:
             pass
+    bytes_a = t1.result() if t1.done() and not t1.cancelled() else 0
+    bytes_b = t2.result() if t2.done() and not t2.cancelled() else 0
+    return (bytes_a, bytes_b)
 
 
 # --------- EU: detect listening TCP ports ----------
@@ -480,7 +486,7 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                     asyncio.open_connection("127.0.0.1", target_port), timeout=5.0
                 )
             except Exception as e:
-                log.warning(f"[EU-WORKER] Local target port {target_port} unreachable on EU server (127.0.0.1:{target_port}): {e}")
+                log.error(f"[EU-WORKER] ❌ Target port {target_port} UNREACHABLE on EU (127.0.0.1:{target_port}) -> {e}. Is Xray/V2Ray running on port {target_port}?")
                 try:
                     writer.write(b"\x01")
                     await asyncio.wait_for(writer.drain(), timeout=2.0)
@@ -496,7 +502,9 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
                 pass
                 
             tune_writer(local_writer)
-            await bridge_async(reader, writer, local_reader, local_writer)
+            log.info(f"[EU-WORKER] ⚡ Bridging connection to 127.0.0.1:{target_port}")
+            rx, tx = await bridge_async(reader, writer, local_reader, local_writer)
+            log.info(f"[EU-WORKER] ⏹ Bridge closed for Port {target_port} (UP: {rx:,} B, DOWN: {tx:,} B)")
         except Exception:
             pass
         finally:
@@ -597,6 +605,11 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
 
     async def handle_user_client(user_reader: asyncio.StreamReader, user_writer: asyncio.StreamWriter, target_port: int):
         tune_writer(user_writer)
+        peer = user_writer.get_extra_info("peername")
+        client_addr = f"{peer[0]}:{peer[1]}" if peer else "unknown"
+        
+        log.info(f"[TRAFFIC] 🟢 Inbound connection from {client_addr} on Port {target_port}")
+        
         deadline = time.time() + POOL_WAIT
         europe: Optional[Tuple[asyncio.StreamReader, asyncio.StreamWriter]] = None
         while time.time() < deadline:
@@ -622,7 +635,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                 pass
 
         if europe is None:
-            log.warning(f"[IR-TRAFFIC] Connection for port {target_port} FAILED: No EU bridge worker available in pool (Pool empty / Timeout).")
+            log.error(f"[ERROR] ❌ Port {target_port} FAILED for {client_addr}: Worker pool is EMPTY! (EU server has no active reverse workers. Check if EU tunnel service is running)")
             try: user_writer.close()
             except Exception: pass
             return
@@ -634,7 +647,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
             
             status = await asyncio.wait_for(eu_reader.readexactly(1), timeout=5.0)
             if status != b"\x00":
-                log.warning(f"[IR-TRAFFIC] EU worker rejected connection for port {target_port} (Local service not running on EU).")
+                log.error(f"[ERROR] ❌ Port {target_port} FAILED for {client_addr}: Local service on EU server is DOWN or NOT listening on 127.0.0.1:{target_port}! (Check Xray/V2Ray on EU server)")
                 try: user_writer.close()
                 except Exception: pass
                 try: eu_writer.close()
@@ -642,14 +655,16 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                 return
                 
         except Exception as e:
-            log.warning(f"[IR-TRAFFIC] Failed sending target port {target_port} header to EU worker (or timeout): {e}")
+            log.error(f"[ERROR] ❌ Port {target_port} FAILED for {client_addr}: Bridge communication error with EU worker -> {e}")
             try: user_writer.close()
             except Exception: pass
             try: eu_writer.close()
             except Exception: pass
             return
 
-        await bridge_async(user_reader, user_writer, eu_reader, eu_writer)
+        log.info(f"[TRAFFIC] ⚡ Stream ACTIVE: {client_addr} <-> EU Port {target_port}")
+        rx, tx = await bridge_async(user_reader, user_writer, eu_reader, eu_writer)
+        log.info(f"[TRAFFIC] ⏹ Connection CLOSED for {client_addr} on Port {target_port} (Transferred: {rx:,} bytes UP, {tx:,} bytes DOWN)")
 
     def create_user_handler(target_port: int):
         async def _cb(r: asyncio.StreamReader, w: asyncio.StreamWriter):
