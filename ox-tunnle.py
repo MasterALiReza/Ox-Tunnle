@@ -466,14 +466,15 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             finally:
                 idle_workers -= 1
 
-        except asyncio.IncompleteReadError:
+        except (asyncio.IncompleteReadError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             return
         except Exception as e:
-            global_conn_error = True
-            now = time.time()
-            if now - last_conn_err_time > 15:
-                log.warning(f"[EU-WORKER] Connection error to Iran bridge {iran_ip}:{bridge_port} -> {e}")
-                last_conn_err_time = now
+            if isinstance(e, (ConnectionRefusedError, socket.gaierror, TimeoutError, OSError)):
+                global_conn_error = True
+                now = time.time()
+                if now - last_conn_err_time > 30:
+                    log.warning(f"[EU-WORKER] Cannot reach Iran bridge {iran_ip}:{bridge_port} -> {e}")
+                    last_conn_err_time = now
             return
 
         # Bridge active
