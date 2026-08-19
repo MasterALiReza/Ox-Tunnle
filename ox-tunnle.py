@@ -491,10 +491,14 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
 
         # 2. Wait in Pool (with TTL) for incoming user traffic from Iran
         idle_workers += 1
+        worker_start_time = time.time()
         try:
             hdr = await asyncio.wait_for(reader.readexactly(2), timeout=random.uniform(35.0, 55.0))
         except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError, OSError):
             # Normal idle recycling or peer socket closed — clean exit
+            # If closed immediately (<1.2s) without data, Iran pool was full — backoff briefly to avoid storm
+            if time.time() - worker_start_time < 1.2:
+                await asyncio.sleep(1.0)
             try: writer.close()
             except Exception: pass
             return
@@ -545,17 +549,17 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             if idle_workers < desired_idle and total < max_workers:
                 to_spawn = min(desired_idle - idle_workers, max_workers - total)
                 if idle_workers < (desired_idle // 4):
-                    batch = min(to_spawn, 25)
+                    batch = min(to_spawn, 20)
                 elif idle_workers < (desired_idle // 2):
-                    batch = min(to_spawn, 15)
+                    batch = min(to_spawn, 10)
                 else:
-                    batch = min(to_spawn, 8)
+                    batch = min(to_spawn, 5)
                 for _ in range(batch):
                     task = asyncio.create_task(reverse_link_worker())
                     worker_tasks.add(task)
                     task.add_done_callback(worker_tasks.discard)
             
-            await asyncio.sleep(0.02 if idle_workers < (desired_idle // 2) else 0.08)
+            await asyncio.sleep(0.05 if idle_workers < (desired_idle // 2) else 0.15)
 
     async def smart_watchdog_loop():
         """Periodically monitors worker pool health and triggers instant recovery if starving."""
@@ -609,19 +613,24 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
     active_servers: Dict[int, Any] = {}
     sync_sem = asyncio.Semaphore(MAX_SYNC_CONNS)
 
+    last_pool_full_warn = 0.0
+
     async def handle_bridge_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        nonlocal last_pool_full_warn
         tune_writer(writer)
         peer = writer.get_extra_info("peername")
         peer_str = f"{peer[0]}:{peer[1]}" if peer else "unknown"
         if await authenticate_server_async(reader, writer, secret):
             if pool.full():
-                log.warning(f"[IR-BRIDGE] Connection from {peer_str} dropped: Pool is FULL ({pool.maxsize} connections).")
+                now = time.time()
+                if now - last_pool_full_warn > 60.0:
+                    log.info(f"[IR-BRIDGE] Worker pool is saturated ({pool.maxsize} connections). Excess connections closed.")
+                    last_pool_full_warn = now
                 writer.close()
                 return
             try:
                 pool.put_nowait((reader, writer, time.time()))
             except Exception as e:
-                log.warning(f"[IR-BRIDGE] Failed to put worker from {peer_str} into pool: {e}")
                 writer.close()
         else:
             log.warning(f"[IR-BRIDGE] Auth FAILED for incoming bridge connection from {peer_str}")
