@@ -3,7 +3,7 @@
 Ox Tunnle — High-Performance Reverse TCP Tunnel
 https://github.com/MasterALiReza/Ox-Tunnle
 """
-import os, sys, time, socket, struct, subprocess, re, signal, logging, hashlib, hmac, random, asyncio
+import os, sys, time, socket, struct, subprocess, re, signal, logging, hashlib, hmac, random, asyncio, errno
 try:
     import resource
 except ImportError:
@@ -46,6 +46,23 @@ BUF_COPY       = 64 * 1024           # 64 KB userspace buffer (optimized from 25
 POOL_WAIT      = 5                   # 5 seconds pool wait
 SYNC_INTERVAL  = 3
 MAX_SYNC_CONNS = 50
+
+# Ports that IR will NEVER open even if EU requests them via AutoSync.
+# Protects against a compromised EU server forcing sensitive ports open on IR.
+SYNC_BLOCKED_PORTS: Set[int] = {
+    22,    # SSH
+    23,    # Telnet
+    25,    # SMTP
+    53,    # DNS
+    80,    # HTTP
+    110,   # POP3
+    143,   # IMAP
+    443,   # HTTPS
+    3306,  # MySQL
+    5432,  # PostgreSQL
+    6379,  # Redis
+    27017, # MongoDB
+}
 
 # --------- Auto pool sizing ----------
 def auto_pool_size(role: str = "ir") -> int:
@@ -147,7 +164,6 @@ def is_socket_alive_async(writer: asyncio.StreamWriter, reader: asyncio.StreamRe
             return False
     except Exception:
         return True
-    return True
 
 
 def setup_signals(stop_event: asyncio.Event, loop: asyncio.AbstractEventLoop):
@@ -172,6 +188,8 @@ async def authenticate_client_async(reader: asyncio.StreamReader, writer: asynci
     secret = (secret or "").strip().strip("'\"")
     try:
         if not secret:
+            log.warning("[SECURITY] ⚠ No authentication secret configured! "
+                        "Tunnel is UNSECURED — any host can connect to bridge port.")
             writer.write(b"\x00")
             await writer.drain()
             return True
@@ -222,7 +240,10 @@ async def authenticate_server_async(reader: asyncio.StreamReader, writer: asynci
                 log.warning("[SECURITY] Connection dropped: unauthenticated client attempted connection.")
                 return False
             elif flag == b"\x01":
-                # Legacy static token hash compatibility
+                # DEPRECATED: Legacy static token hash — vulnerable to replay attacks.
+                # Clients should upgrade to flag 0x02 (HMAC challenge-response).
+                log.warning("[SECURITY] DEPRECATED: Legacy static auth (flag 0x01) used. "
+                            "This is replay-vulnerable. Upgrade client to HMAC challenge-response (flag 0x02).")
                 client_hash = await reader.readexactly(32)
                 expected_hash = hashlib.sha256(expected_secret.encode("utf-8")).digest()
                 if not hmac.compare_digest(client_hash, expected_hash):
@@ -648,9 +669,16 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                         (p,) = struct.unpack("!H", pd)
                         current_ports.add(p)
                     if auto_sync:
+                        safe_ports = set()
                         for p in current_ports:
+                            if p <= 1024 or p in SYNC_BLOCKED_PORTS:
+                                log.warning(f"[IR-SYNC] Refusing to open privileged/blocked port {p} "
+                                            f"(requested by EU AutoSync — security policy)")
+                            else:
+                                safe_ports.add(p)
+                        for p in safe_ports:
                             await open_port(p)
-                        await prune_inactive_ports(current_ports)
+                        await prune_inactive_ports(safe_ports)
             except Exception:
                 pass
             finally:
@@ -747,7 +775,11 @@ def main():
     parser.add_argument("--iran-ip", "-i", help="Iran Server IP (required for EU role)")
     parser.add_argument("--bridge-port", "-b", type=int, default=7000, help="Bridge Port (default: 7000)")
     parser.add_argument("--sync-port", "-s", type=int, default=7001, help="Sync Port (default: 7001)")
-    parser.add_argument("--auto-sync", "-a", action="store_true", default=True, help="Auto sync ports from IR (IR role)")
+    # FIX LOW-02: --auto-sync with store_true+default=True was broken (could never be disabled).
+    # Now use --no-auto-sync to explicitly disable it; default remains True (auto-sync on).
+    parser.add_argument("--no-auto-sync", dest="auto_sync", action="store_false",
+                        help="Disable auto sync (IR role). Default: auto-sync is ON.")
+    parser.set_defaults(auto_sync=True)
     parser.add_argument("--ports", "-p", default="", help="Manual ports CSV if auto-sync is disabled")
     parser.add_argument("--secret", default=os.environ.get("OXTUNNEL_SECRET", ""), help="Secret auth token")
 

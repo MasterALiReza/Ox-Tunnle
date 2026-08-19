@@ -5,3 +5,11 @@ __pycache__/
 .env
 .agents/
 *.log
+
+# ── Security: Test/debug scripts with real credentials ───────
+# NEVER commit these files — they may contain real IPs/passwords
+test_tunnel_*.py
+check_xui.py
+
+# ── Runtime cache files ───────────────────────────────────────
+/tmp/.oxtunnel_*.cache

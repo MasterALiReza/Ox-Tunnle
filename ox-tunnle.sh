@@ -177,8 +177,21 @@ _CACHE_READY=0
 _fetch_server_info() {
   local cache_file="/tmp/.oxtunnel_server_info.cache"
   if [[ -f "$cache_file" && -s "$cache_file" ]]; then
-    # shellcheck disable=SC1090
-    source "$cache_file" 2>/dev/null || true
+    # FIX HIGH-03: Safe key=value parser instead of 'source' to prevent shell injection.
+    # /tmp is world-writable; sourcing it as root would allow privilege escalation.
+    local _line _key _val
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+      [[ -z "$_line" || "$_line" =~ ^# ]] && continue
+      if [[ "$_line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=\"(.*)\"$ ]]; then
+        _key="${BASH_REMATCH[1]}"
+        _val="${BASH_REMATCH[2]}"
+        case "$_key" in
+          _CACHE_IP)  _CACHE_IP="$_val"  ;;
+          _CACHE_LOC) _CACHE_LOC="$_val" ;;
+          _CACHE_DC)  _CACHE_DC="$_val"  ;;
+        esac
+      fi
+    done < "$cache_file"
     _CACHE_IP="${_CACHE_IP:-Unknown}"
     _CACHE_LOC="${_CACHE_LOC:-Unknown}"
     _CACHE_DC="${_CACHE_DC:-Unknown}"
@@ -272,8 +285,9 @@ _stop_slot() {
     # Stop in background to prevent hanging on older systemd units missing TimeoutStopSec
     systemctl stop "ox-tunnle@${prof}.service" >/dev/null 2>&1 &
     local stop_pid=$!
-    sleep 0.5
-    # Aggressively kill the process to release systemctl stop immediately
+    # MED-01: Wait 1.5s (was 0.5s) to allow asyncio graceful shutdown before SIGKILL
+    sleep 1.5
+    # Final cleanup: kill any remaining process after graceful shutdown window
     pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
     wait $stop_pid 2>/dev/null || true
     systemctl disable "ox-tunnle@${prof}.service" >/dev/null 2>&1 || true
@@ -281,7 +295,8 @@ _stop_slot() {
   else
     pkill -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
     pkill -f "${CONF}/${prof}.env" >/dev/null 2>&1 || true
-    sleep 0.3
+    # MED-01: Wait 1.0s (was 0.3s) for graceful shutdown
+    sleep 1.0
     pkill -9 -f "OXTUNNEL_PROFILE=${prof}.*${PY}" >/dev/null 2>&1 || true
   fi
 }
@@ -444,7 +459,9 @@ _status_slot() {
     echo -e "  ${CYN}AutoSync${R}: ${AUTO_SYNC:-true}${PORTS:+   Ports: $PORTS}"
   fi
   if [[ -n "$SECRET" ]]; then
-    echo -e "  ${CYN}Auth Token${R}: ${GRN}Enabled${R} (${B}${SECRET}${R})"
+    # LOW-03: Mask secret to prevent shoulder-surfing / terminal log exposure
+    local _masked_secret="${SECRET:0:6}****${SECRET: -4}"
+    echo -e "  ${CYN}Auth Token${R}: ${GRN}Enabled${R} (${B}${_masked_secret}${R})"
   fi
   echo -e "  ${CYN}Status${R}  : ${st_c}${B}${st_i} ${st_t}${R}"
   echo ""
@@ -459,6 +476,10 @@ _show_config() {
   while IFS='=' read -r key val || [[ -n "$key" ]]; do
     [[ -z "$key" || "$key" =~ ^# ]] && continue
     val="${val//\"/}"
+    # LOW-04: Mask SECRET value to prevent terminal log exposure
+    if [[ "$key" == "SECRET" && -n "$val" ]]; then
+      val="${val:0:6}****${val: -4}"
+    fi
     echo -e "  ${CYN}${key}${R} = ${GRN}${val}${R}"
   done < "$f"
   _hr
