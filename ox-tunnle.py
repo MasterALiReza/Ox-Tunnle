@@ -763,7 +763,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                     if auto_sync:
                         safe_ports = set()
                         for p in current_ports:
-                            if p <= 1024 or p in SYNC_BLOCKED_PORTS:
+                            if p < 80 or p in SYNC_BLOCKED_PORTS:
                                 if p not in warned_blocked_ports:
                                     log.warning(f"[IR-SYNC] Refusing to open privileged/blocked port {p} "
                                                 f"(requested by EU AutoSync — security policy)")
