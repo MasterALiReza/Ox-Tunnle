@@ -420,9 +420,9 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
     worker_tasks = set()
     idle_workers = 0
     active_workers = 0
-    # Keep 30-50 ultra-fresh warm standby workers ready for instant handshakes
-    desired_idle = min(max(pool_size // 6, 30), 60)
-    max_workers = max(pool_size * 4, 2000)
+    # Keep 60-120 ultra-fresh warm standby workers ready for instant handshakes
+    desired_idle = min(max(pool_size // 4, 60), 120)
+    max_workers = max(pool_size * 4, 2500)
     last_conn_err_time = 0
     global_conn_error = False
 
@@ -547,17 +547,17 @@ async def eu_mode_async(iran_ip: str, bridge_port: int, sync_port: int, pool_siz
             if idle_workers < desired_idle and total < max_workers:
                 to_spawn = min(desired_idle - idle_workers, max_workers - total)
                 if idle_workers < (desired_idle // 4):
-                    batch = min(to_spawn, 15)
+                    batch = min(to_spawn, 25)
                 elif idle_workers < (desired_idle // 2):
-                    batch = min(to_spawn, 8)
+                    batch = min(to_spawn, 15)
                 else:
-                    batch = min(to_spawn, 4)
+                    batch = min(to_spawn, 6)
                 for _ in range(batch):
                     task = asyncio.create_task(reverse_link_worker())
                     worker_tasks.add(task)
                     task.add_done_callback(worker_tasks.discard)
             
-            await asyncio.sleep(0.05 if idle_workers < (desired_idle // 2) else 0.20)
+            await asyncio.sleep(0.01 if idle_workers < (desired_idle // 4) else (0.05 if idle_workers < (desired_idle // 2) else 0.15))
 
     async def smart_watchdog_loop():
         """Periodically monitors worker pool health and triggers instant recovery if starving."""
@@ -607,7 +607,7 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
     stop_event = asyncio.Event()
     setup_signals(stop_event, loop)
 
-    pool = asyncio.LifoQueue(maxsize=150)
+    pool = asyncio.LifoQueue(maxsize=300)
     active_servers: Dict[int, Any] = {}
     sync_sem = asyncio.Semaphore(MAX_SYNC_CONNS)
 
