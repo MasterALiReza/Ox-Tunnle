@@ -618,8 +618,6 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
     async def handle_bridge_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         nonlocal last_pool_full_warn
         tune_writer(writer)
-        peer = writer.get_extra_info("peername")
-        peer_str = f"{peer[0]}:{peer[1]}" if peer else "unknown"
         if await authenticate_server_async(reader, writer, secret):
             if pool.full():
                 now = time.time()
@@ -630,10 +628,9 @@ async def ir_mode_async(bridge_port: int, sync_port: int, pool_size: int,
                 return
             try:
                 pool.put_nowait((reader, writer, time.time()))
-            except Exception as e:
+            except Exception:
                 writer.close()
         else:
-            log.warning(f"[IR-BRIDGE] Auth FAILED for incoming bridge connection from {peer_str}")
             writer.close()
 
     async def handle_user_client(user_reader: asyncio.StreamReader, user_writer: asyncio.StreamWriter, target_port: int):
