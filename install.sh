@@ -38,18 +38,41 @@ fi
 CORE_DEPS=(curl ca-certificates python3 iproute2)
 MISSING_DEPS=()
 for dep in "${CORE_DEPS[@]}"; do
-  if ! dpkg -s "$dep" > /dev/null 2>&1; then
-    MISSING_DEPS+=("$dep")
-  fi
+  case "$dep" in
+    python3)
+      command -v python3 >/dev/null 2>&1 || MISSING_DEPS+=("$dep")
+      ;;
+    curl)
+      command -v curl >/dev/null 2>&1 || MISSING_DEPS+=("$dep")
+      ;;
+    iproute2)
+      command -v ip >/dev/null 2>&1 || command -v ss >/dev/null 2>&1 || MISSING_DEPS+=("$dep")
+      ;;
+    *)
+      if command -v dpkg >/dev/null 2>&1; then
+        dpkg -s "$dep" >/dev/null 2>&1 || MISSING_DEPS+=("$dep")
+      elif command -v rpm >/dev/null 2>&1; then
+        rpm -q "$dep" >/dev/null 2>&1 || MISSING_DEPS+=("$dep")
+      fi
+      ;;
+  esac
 done
 
 if [[ ${#MISSING_DEPS[@]} -gt 0 ]]; then
   info "Installing missing dependencies: ${MISSING_DEPS[*]} ..."
-  export DEBIAN_FRONTEND=noninteractive
-  timeout 10 apt-get update -y > /dev/null 2>&1 || warn "apt-get update skipped/timed out"
-  for dep in "${MISSING_DEPS[@]}"; do
-    timeout 20 apt-get install -y "$dep" > /dev/null 2>&1 || warn "Could not install $dep"
-  done
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    timeout 15 apt-get update -y > /dev/null 2>&1 || true
+    timeout 30 apt-get install -y "${MISSING_DEPS[@]}" > /dev/null 2>&1 || true
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y "${MISSING_DEPS[@]}" > /dev/null 2>&1 || true
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y "${MISSING_DEPS[@]}" > /dev/null 2>&1 || true
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache "${MISSING_DEPS[@]}" > /dev/null 2>&1 || true
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm "${MISSING_DEPS[@]}" > /dev/null 2>&1 || true
+  fi
 else
   ok "Core dependencies (curl, python3, iproute2) already installed."
 fi

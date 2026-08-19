@@ -14,7 +14,13 @@ GITHUB_REPO="github.com/MasterALiReza/Ox-Tunnle"
 SCRIPT_FILENAME="ox-tunnle.sh"
 SELF_URL="https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/${SCRIPT_FILENAME}"
 
-PY="/opt/ox-tunnle/ox-tunnle.py"
+if [[ -f "/opt/ox-tunnle/ox-tunnle.py" ]]; then
+  PY="/opt/ox-tunnle/ox-tunnle.py"
+elif [[ -f "/usr/local/bin/ox-tunnle.py" ]]; then
+  PY="/usr/local/bin/ox-tunnle.py"
+else
+  PY="/opt/ox-tunnle/ox-tunnle.py"
+fi
 PY_URL="https://raw.githubusercontent.com/MasterALiReza/Ox-Tunnle/main/ox-tunnle.py"
 INSTALL_PATH="/usr/local/bin/ox-tunnle"
 
@@ -314,6 +320,14 @@ _run_slot() {
     local check_ports=()
     [[ -n "${BRIDGE:-}" ]] && check_ports+=("$BRIDGE")
     [[ -n "${SYNC:-}" ]] && check_ports+=("$SYNC")
+    if [[ -n "${PORTS:-}" ]]; then
+      local _mp
+      IFS=',' read -ra _manual_ports <<< "$PORTS"
+      for _mp in "${_manual_ports[@]}"; do
+        _mp="$(echo "$_mp" | tr -d ' ')"
+        [[ -n "$_mp" ]] && check_ports+=("$_mp")
+      done
+    fi
     for p in "${check_ports[@]}"; do
       if ss -tlnp 2>/dev/null | grep -q ":${p} "; then
         _msg_warn "Port ${p} is in use by another process. The tunnel might loop/fail."

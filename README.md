@@ -161,9 +161,11 @@ journalctl -u ox-tunnle@eu1 -f
 # 🔐 Security & Architecture Hardening
 
 Ox Tunnle enforces modern security and stability practices:
-- **Challenge-Response Auth:** Unlike static hashes, every connection performs a dynamic 16-byte nonce challenge verified via HMAC-SHA256, nullifying packet replay attempts.
-- **Anti-Probing & Scanner Drop:** Unauthenticated attempts on Bridge or Sync ports are dropped immediately within 3 seconds without leaking handshake banners.
+- **Mutual Challenge-Response Auth:** Every worker connection performs a dynamic 16-byte mutual nonce challenge verified via HMAC-SHA256 with constant-time digest comparison, nullifying replay attacks and MITM attempts.
+- **AutoSync Privilege Blacklisting:** The Iran server enforces a strict port blacklist (blocking privileged ports <1024 as well as database/management ports such as SSH 22, HTTP 80, HTTPS 443, MySQL 3306, Postgres 5432, Redis 6379) to prevent any compromised worker from exposing internal services.
+- **Anti-Probing & Scanner Drop:** Unauthenticated attempts on Bridge or Sync ports are dropped immediately with strict timeouts without leaking handshake banners.
 - **Resource Protection:** Dynamic pool allocation scales with system RAM and file descriptor limits, preventing connection starvation and memory overflow.
+- **Payload Security:** Ox Tunnle bridges layer-4 TCP streams. For end-to-end encrypted tunnels, pair with TLS, Reality, or V2Ray protocols.
 
 ---
 
